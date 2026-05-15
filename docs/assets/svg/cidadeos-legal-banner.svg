@@ -1,0 +1,30 @@
+<svg width="1200" height="210" viewBox="0 0 1200 210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Natureza do repositório">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1"><stop stop-color="#0A1F3D"/><stop offset="1" stop-color="#0E3A5E"/></linearGradient>
+    <style>
+      .title{font:850 26px Inter,Segoe UI,Arial;fill:#EAF3F8}
+      .muted{font:500 14px Inter,Segoe UI,Arial;fill:#B9CAD8}
+      .label{font:800 15px Inter,Segoe UI,Arial;fill:#EAF3F8}
+      .pill{fill:#ffffff12;stroke:#ffffff22;stroke-width:1.5}
+      .dot{animation:blink 2.4s ease-in-out infinite}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){.dot{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="210" rx="24" fill="url(#bg)"/>
+  <text x="42" y="50" class="title">Natureza do repositório</text>
+  <text x="42" y="78" class="muted">Portfólio técnico e documentação de produto. Código, marca, fluxos e identidade visual são proprietários.</text>
+
+  <g transform="translate(42 112)">
+    <rect class="pill" width="198" height="42" rx="21"/><circle class="dot" cx="22" cy="21" r="6" fill="#36C7D0"/><text x="40" y="26" class="label">não é open source</text>
+  </g>
+  <g transform="translate(260 112)">
+    <rect class="pill" width="232" height="42" rx="21"/><circle class="dot" cx="22" cy="21" r="6" fill="#36C7D0"/><text x="40" y="26" class="label">não é template gratuito</text>
+  </g>
+  <g transform="translate(512 112)">
+    <rect class="pill" width="226" height="42" rx="21"/><circle class="dot" cx="22" cy="21" r="6" fill="#36C7D0"/><text x="40" y="26" class="label">não é biblioteca pública</text>
+  </g>
+  <g transform="translate(758 112)">
+    <rect class="pill" width="398" height="42" rx="21"/><circle class="dot" cx="22" cy="21" r="6" fill="#36C7D0"/><text x="40" y="26" class="label">uso restrito a portfólio, demonstração e apresentação</text>
+  </g>
+</svg>

@@ -1,0 +1,58 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CidadeOS AI">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="360">
+      <stop offset="0%" stop-color="#071B34"/>
+      <stop offset="50%" stop-color="#0A2F4D"/>
+      <stop offset="100%" stop-color="#071B34"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" x2="1">
+      <stop stop-color="#19A7A8"/>
+      <stop offset="1" stop-color="#36C7D0"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .grid{stroke:#D7E5EF;stroke-opacity:.07;stroke-width:1}
+      .pulse{animation:pulse 2.8s ease-in-out infinite;transform-origin:188px 170px}
+      .scan{animation:scan 4.1s ease-in-out infinite}
+      .node{animation:blink 2.6s ease-in-out infinite}
+      .city{animation:city 4s ease-in-out infinite}
+      @keyframes pulse{0%,100%{opacity:.55;transform:scale(.96)}50%{opacity:1;transform:scale(1.05)}}
+      @keyframes scan{0%{transform:translateX(-110px);opacity:0}20%,72%{opacity:.85}100%{transform:translateX(310px);opacity:0}}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @keyframes city{0%,100%{opacity:.26}50%{opacity:.42}}
+      @media (prefers-reduced-motion: reduce){.pulse,.scan,.node,.city{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="360" rx="26" fill="url(#bg)"/>
+  <path class="grid" d="M0 72H1200M0 144H1200M0 216H1200M0 288H1200M120 0V360M240 0V360M360 0V360M480 0V360M600 0V360M720 0V360M840 0V360M960 0V360M1080 0V360"/>
+  <g transform="translate(88 68)">
+    <rect x="0" y="0" width="200" height="200" rx="40" fill="#0B223D" stroke="#19A7A8" stroke-opacity=".26"/>
+    <rect class="scan" x="-90" y="0" width="48" height="200" fill="#36C7D0" opacity=".09"/>
+    <g class="city" fill="#6F9AB6">
+      <path d="M20 160H180V186H20z" opacity=".12"/>
+      <path d="M28 146H46V186H28zM54 138H76V186H54zM86 150H104V186H86zM112 142H130V186H112zM140 132H164V186H140z" opacity=".22"/>
+    </g>
+    <circle class="pulse" cx="76" cy="102" r="54" fill="none" stroke="url(#teal)" stroke-width="9" stroke-linecap="round" stroke-dasharray="136 85" filter="url(#glow)"/>
+    <path d="M76 48C46 48 22 72 22 102C22 132 46 156 76 156C106 156 130 132 130 102C130 72 106 48 76 48Z" fill="none" stroke="#F4F8FB" stroke-width="18" stroke-linecap="round" stroke-dasharray="232 78"/>
+    <path d="M22 102H60" stroke="#F4F8FB" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="76" cy="102" r="12" fill="url(#teal)"/>
+    <path d="M132 60H172C181 60 188 67 188 76C188 85 181 92 172 92H149C138 92 131 99 131 109C131 120 139 127 150 127H188" fill="none" stroke="#F4F8FB" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M70 34V18H124V10H178M80 170V182H36V190H16" stroke="#19A7A8" stroke-width="4.5" stroke-linecap="round"/>
+    <rect class="node" x="174" y="6" width="10" height="10" rx="2" fill="#36C7D0"/>
+    <rect class="node" x="12" y="186" width="10" height="10" rx="2" fill="#36C7D0"/>
+  </g>
+  <text x="340" y="118" fill="#EAF3F8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="60" font-weight="850" letter-spacing="-2">CidadeOS <tspan fill="#36C7D0">AI</tspan></text>
+  <text x="344" y="160" fill="#B9CAD8" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="500">Plataforma de Atendimento e Inteligência Urbana</text>
+  <text x="344" y="208" fill="#F4F8FB" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="600">modelo .gov moderno — protocolo digital — triagem operacional — transparência — atendimento multicanal</text>
+  <g transform="translate(344 248)">
+    <rect width="168" height="42" rx="21" fill="#EAF3F8" fill-opacity=".08" stroke="#EAF3F8" stroke-opacity=".16"/>
+    <text x="24" y="27" fill="#EAF3F8" font-family="Inter,Segoe UI,Arial" font-size="14" font-weight="700">símbolo OS</text>
+    <rect x="184" width="188" height="42" rx="21" fill="#36C7D0" fill-opacity=".12" stroke="#36C7D0" stroke-opacity=".4"/>
+    <text x="206" y="27" fill="#A9F3F4" font-family="Inter,Segoe UI,Arial" font-size="14" font-weight="700">govtech / smart city</text>
+    <rect x="390" width="162" height="42" rx="21" fill="#EAF3F8" fill-opacity=".08" stroke="#EAF3F8" stroke-opacity=".16"/>
+    <text x="416" y="27" fill="#EAF3F8" font-family="Inter,Segoe UI,Arial" font-size="14" font-weight="700">preview 2.3</text>
+  </g>
+</svg>

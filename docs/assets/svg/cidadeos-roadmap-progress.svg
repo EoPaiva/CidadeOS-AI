@@ -1,0 +1,65 @@
+<svg width="1200" height="320" viewBox="0 0 1200 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Roadmap e estimativa do CidadeOS AI">
+  <defs>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop stop-color="#0A1F3D"/>
+      <stop offset="1" stop-color="#19A7A8"/>
+    </linearGradient>
+    <style>
+      .title{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:28px;font-weight:850;fill:#0A1F3D}
+      .muted{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:14px;font-weight:500;fill:#5A6878}
+      .big{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:38px;font-weight:900;fill:#0A1F3D}
+      .mid{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:20px;font-weight:850;fill:#0A1F3D}
+      .small{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:13px;font-weight:600;fill:#5A6878}
+      .label{font-family:Inter,Segoe UI,Arial,sans-serif;font-size:14px;font-weight:800;fill:#0A1F3D}
+      .bar{animation:bar 1.8s ease-out both;transform-origin:left}
+      .ring{animation:ringIn 1.8s ease-out both;transform-origin:center}
+      @keyframes bar{from{transform:scaleX(.08);opacity:.35}to{transform:scaleX(1);opacity:1}}
+      @keyframes ringIn{from{opacity:.35;transform:scale(.94)}to{opacity:1;transform:scale(1)}}
+      @media (prefers-reduced-motion: reduce){.bar,.ring{animation:none}}
+    </style>
+  </defs>
+
+  <rect width="1200" height="320" rx="26" fill="#F4F8FB"/>
+
+  <text x="60" y="58" class="title">Roadmap e estimativa</text>
+  <text x="60" y="86" class="muted">Leitura executiva do avanço atual e da próxima janela de maturidade do produto.</text>
+
+  <!-- Cards baseline: all aligned at y=122, equal height -->
+  <g transform="translate(60 122)">
+    <rect width="330" height="140" rx="22" fill="#FFFFFF" stroke="#D7E5EF" stroke-width="2"/>
+    <g class="ring" transform="translate(78 70)">
+      <circle cx="0" cy="0" r="44" fill="none" stroke="#D7E5EF" stroke-width="11"/>
+      <circle cx="0" cy="0" r="44" fill="none" stroke="url(#accent)" stroke-width="11" stroke-linecap="round" stroke-dasharray="199 276" transform="rotate(-90)"/>
+      <text x="-32" y="9" class="big">72%</text>
+    </g>
+    <text x="155" y="52" class="mid">núcleo consolidado</text>
+    <text x="155" y="78" class="small">base funcional estimada</text>
+    <text x="155" y="101" class="small">portal, painel, dados e triagem</text>
+  </g>
+
+  <g transform="translate(435 122)">
+    <rect width="330" height="140" rx="22" fill="#FFFFFF" stroke="#D7E5EF" stroke-width="2"/>
+    <text x="28" y="54" class="big">28%</text>
+    <text x="28" y="80" class="label">restante estimado</text>
+    <text x="28" y="103" class="small">anexos, WhatsApp real, IA</text>
+    <text x="28" y="123" class="small">mapa, auth e multi-tenant</text>
+    <rect x="212" y="43" width="82" height="64" rx="14" fill="#F4F8FB" stroke="#D7E5EF"/>
+    <rect class="bar" x="230" y="87" width="14" height="14" rx="3" fill="#0A1F3D"/>
+    <rect class="bar" x="252" y="70" width="14" height="31" rx="3" fill="#0E3A5E"/>
+    <rect class="bar" x="274" y="52" width="14" height="49" rx="3" fill="#19A7A8"/>
+  </g>
+
+  <g transform="translate(810 122)">
+    <rect width="330" height="140" rx="22" fill="#FFFFFF" stroke="#D7E5EF" stroke-width="2"/>
+    <text x="28" y="54" class="big">15–30</text>
+    <text x="28" y="80" class="label">dias estimados</text>
+    <text x="28" y="103" class="small">próxima rodada forte</text>
+    <text x="28" y="123" class="small">com ritmo contínuo de evolução</text>
+    <rect x="220" y="44" width="78" height="58" rx="14" fill="#F4F8FB" stroke="#D7E5EF"/>
+    <path d="M239 65H279M239 82H269" stroke="#0A1F3D" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="282" cy="82" r="5" fill="#19A7A8"/>
+  </g>
+
+  <path d="M60 284H1140" stroke="#D7E5EF" stroke-width="2" stroke-linecap="round"/>
+  <path class="bar" d="M60 284H615" stroke="url(#accent)" stroke-width="3" stroke-linecap="round"/>
+</svg>

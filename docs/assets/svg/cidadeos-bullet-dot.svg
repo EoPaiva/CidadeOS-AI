@@ -1,0 +1,17 @@
+<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Marcador institucional">
+  <defs>
+    <radialGradient id="g" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#36C7D0"/>
+      <stop offset="100%" stop-color="#19A7A8"/>
+    </radialGradient>
+    <style>
+      .dot{animation:pulse 2.4s ease-in-out infinite;transform-origin:12px 12px}
+      .ring{animation:ring 2.4s ease-in-out infinite;transform-origin:12px 12px}
+      @keyframes pulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1)}}
+      @keyframes ring{0%,100%{opacity:.28;transform:scale(.95)}50%{opacity:.5;transform:scale(1.08)}}
+      @media (prefers-reduced-motion: reduce){.dot,.ring{animation:none}}
+    </style>
+  </defs>
+  <circle class="ring" cx="12" cy="12" r="9" fill="none" stroke="#19A7A8" stroke-width="1.8"/>
+  <circle class="dot" cx="12" cy="12" r="4.2" fill="url(#g)"/>
+</svg>

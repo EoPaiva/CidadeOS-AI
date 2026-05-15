@@ -1,0 +1,31 @@
+<svg width="1200" height="220" viewBox="0 0 1200 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Status atual do projeto">
+  <defs>
+    <linearGradient id="bar" x1="0" x2="1"><stop stop-color="#0A1F3D"/><stop offset="1" stop-color="#19A7A8"/></linearGradient>
+    <style>
+      .title{font:850 26px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .muted{font:500 13px Inter,Segoe UI,Arial;fill:#5A6878}
+      .num{font:850 30px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .label{font:750 14px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .fill{animation:grow 1.8s ease-out both;transform-origin:left}
+      @keyframes grow{from{transform:scaleX(.05);opacity:.35}to{transform:scaleX(1);opacity:1}}
+      @media (prefers-reduced-motion: reduce){.fill{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="220" rx="24" fill="#F4F8FB"/>
+  <text x="42" y="48" class="title">Status da entrega</text>
+  <text x="42" y="74" class="muted">Fase 2.3 — Supabase compartilhado, preview online real e operação base consolidada.</text>
+  <text x="42" y="120" class="num">2.3</text>
+  <text x="105" y="120" class="label">fase atual</text>
+
+  <text x="42" y="156" class="label">Núcleo de ocorrência</text>
+  <rect x="42" y="168" width="300" height="14" rx="7" fill="#D7E5EF"/><rect class="fill" x="42" y="168" width="282" height="14" rx="7" fill="url(#bar)"/>
+  <text x="356" y="180" class="muted">94%</text>
+
+  <text x="450" y="156" class="label">Painel e triagem</text>
+  <rect x="450" y="168" width="300" height="14" rx="7" fill="#D7E5EF"/><rect class="fill" x="450" y="168" width="240" height="14" rx="7" fill="url(#bar)"/>
+  <text x="764" y="180" class="muted">80%</text>
+
+  <text x="858" y="156" class="label">WhatsApp Business</text>
+  <rect x="858" y="168" width="300" height="14" rx="7" fill="#D7E5EF"/><rect class="fill" x="858" y="168" width="180" height="14" rx="7" fill="url(#bar)"/>
+  <text x="1172" y="180" class="muted">60%</text>
+</svg>

@@ -1,0 +1,32 @@
+<svg width="1200" height="130" viewBox="0 0 1200 130" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Linguagens e stack">
+  <defs>
+    <style>
+      .label{font:800 15px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .muted{font:500 12px Inter,Segoe UI,Arial;fill:#5A6878}
+      .card{fill:#F4F8FB;stroke:#D7E5EF;stroke-width:2}
+      .dot{animation:blink 2.4s ease-in-out infinite}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){.dot{animation:none}}
+    </style>
+  </defs>
+  <rect x="20" y="18" width="150" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="48" cy="47" r="8" fill="#E34F26"/><text x="68" y="52" class="label">HTML5</text><text x="68" y="74" class="muted">estrutura</text>
+
+  <rect x="190" y="18" width="150" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="218" cy="47" r="8" fill="#1572B6"/><text x="238" y="52" class="label">CSS3</text><text x="238" y="74" class="muted">interface</text>
+
+  <rect x="360" y="18" width="160" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="388" cy="47" r="8" fill="#F7DF1E"/><text x="408" y="52" class="label">JavaScript</text><text x="408" y="74" class="muted">frontend</text>
+
+  <rect x="540" y="18" width="150" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="568" cy="47" r="8" fill="#339933"/><text x="588" y="52" class="label">Node.js</text><text x="588" y="74" class="muted">api local</text>
+
+  <rect x="710" y="18" width="160" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="738" cy="47" r="8" fill="#3ECF8E"/><text x="758" y="52" class="label">Supabase</text><text x="758" y="74" class="muted">dados</text>
+
+  <rect x="890" y="18" width="140" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="918" cy="47" r="8" fill="#000000"/><text x="938" y="52" class="label">Vercel</text><text x="938" y="74" class="muted">preview</text>
+
+  <rect x="1050" y="18" width="130" height="82" rx="18" class="card"/>
+  <circle class="dot" cx="1078" cy="47" r="8" fill="#336791"/><text x="1098" y="52" class="label">SQL</text><text x="1098" y="74" class="muted">schema</text>
+</svg>

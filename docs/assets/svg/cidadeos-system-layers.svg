@@ -1,0 +1,27 @@
+<svg width="1200" height="230" viewBox="0 0 1200 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Camadas operacionais">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1"><stop stop-color="#0A1F3D"/><stop offset="1" stop-color="#19A7A8"/></linearGradient>
+    <style>
+      .title{font:850 26px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .muted{font:500 13px Inter,Segoe UI,Arial;fill:#5A6878}
+      .card{fill:#fff;stroke:#D7E5EF;stroke-width:2}
+      .txt{font:800 16px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .sub{font:500 12px Inter,Segoe UI,Arial;fill:#5A6878}
+      .line{stroke:#19A7A8;stroke-width:3;stroke-linecap:round;stroke-dasharray:8 10;animation:dash 12s linear infinite}
+      .dot{animation:blink 2.7s ease-in-out infinite}
+      @keyframes dash{to{stroke-dashoffset:-180}}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){.line,.dot{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="230" rx="24" fill="#F4F8FB"/>
+  <text x="42" y="46" class="title">Camadas operacionais</text>
+  <text x="42" y="72" class="muted">Entrada pública, operação, API, dados compartilhados e canal digital por cidade.</text>
+  <g transform="translate(42 110)"><rect width="152" height="72" rx="16" class="card"/><text x="22" y="38" class="txt">Portal</text><text x="22" y="57" class="sub">cidadão</text></g>
+  <g transform="translate(242 110)"><rect width="152" height="72" rx="16" class="card"/><text x="22" y="38" class="txt">Painel</text><text x="22" y="57" class="sub">agente interno</text></g>
+  <g transform="translate(442 110)"><rect width="164" height="72" rx="16" fill="url(#g)"/><text x="22" y="38" fill="#fff" font-family="Inter,Segoe UI,Arial" font-size="16" font-weight="800">API</text><text x="22" y="57" fill="#EAF3F8" font-family="Inter,Segoe UI,Arial" font-size="12">local + serverless</text></g>
+  <g transform="translate(654 110)"><rect width="170" height="72" rx="16" class="card"/><text x="22" y="38" class="txt">Supabase</text><text x="22" y="57" class="sub">Postgres / RLS</text></g>
+  <g transform="translate(872 110)"><rect width="260" height="72" rx="16" class="card"/><text x="22" y="38" class="txt">WhatsApp Business</text><text x="22" y="57" class="sub">canal oficial configurável</text></g>
+  <path class="line" d="M194 146H242M394 146H442M606 146H654M824 146H872"/>
+  <circle class="dot" cx="218" cy="146" r="6" fill="#19A7A8"/><circle class="dot" cx="418" cy="146" r="6" fill="#19A7A8"/><circle class="dot" cx="630" cy="146" r="6" fill="#19A7A8"/><circle class="dot" cx="848" cy="146" r="6" fill="#19A7A8"/>
+</svg>

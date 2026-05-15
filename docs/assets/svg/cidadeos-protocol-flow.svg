@@ -1,0 +1,22 @@
+<svg width="1200" height="240" viewBox="0 0 1200 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Fluxo de protocolo">
+  <defs>
+    <style>
+      .title{font:850 28px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .muted{font:500 13px Inter,Segoe UI,Arial;fill:#5A6878}
+      .step{font:800 16px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .sub{font:500 12px Inter,Segoe UI,Arial;fill:#5A6878}
+      .line{fill:none;stroke:#19A7A8;stroke-width:4;stroke-linecap:round;stroke-dasharray:10 12;animation:move 10s linear infinite}
+      @keyframes move{to{stroke-dashoffset:-240}}
+      @media (prefers-reduced-motion: reduce){.line{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="240" rx="24" fill="#F4F8FB"/>
+  <text x="42" y="48" class="title">Fluxo de protocolo</text>
+  <text x="42" y="75" class="muted">Do relato inicial até o acompanhamento público e a execução interna.</text>
+  <path class="line" d="M138 142H1060"/>
+  <g transform="translate(90 105)"><circle cx="34" cy="34" r="34" fill="#0A1F3D"/><text x="25" y="42" fill="#fff" font-family="Inter,Arial" font-size="18" font-weight="850">1</text><text x="-8" y="92" class="step">Registro</text><text x="-20" y="110" class="sub">cidadão informa</text></g>
+  <g transform="translate(300 105)"><circle cx="34" cy="34" r="34" fill="#0E3A5E"/><text x="25" y="42" fill="#fff" font-family="Inter,Arial" font-size="18" font-weight="850">2</text><text x="-12" y="92" class="step">Protocolo</text><text x="-18" y="110" class="sub">id rastreável</text></g>
+  <g transform="translate(510 105)"><circle cx="34" cy="34" r="34" fill="#19A7A8"/><text x="25" y="42" fill="#fff" font-family="Inter,Arial" font-size="18" font-weight="850">3</text><text x="-2" y="92" class="step">Triagem</text><text x="-16" y="110" class="sub">prioridade e setor</text></g>
+  <g transform="translate(720 105)"><circle cx="34" cy="34" r="34" fill="#0E3A5E"/><text x="25" y="42" fill="#fff" font-family="Inter,Arial" font-size="18" font-weight="850">4</text><text x="-8" y="92" class="step">Execução</text><text x="-14" y="110" class="sub">agente e SLA</text></g>
+  <g transform="translate(930 105)"><circle cx="34" cy="34" r="34" fill="#0A1F3D"/><text x="25" y="42" fill="#fff" font-family="Inter,Arial" font-size="18" font-weight="850">5</text><text x="-28" y="92" class="step">Transparência</text><text x="-12" y="110" class="sub">status público</text></g>
+</svg>

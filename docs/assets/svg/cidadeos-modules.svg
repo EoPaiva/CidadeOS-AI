@@ -1,0 +1,23 @@
+<svg width="1200" height="330" viewBox="0 0 1200 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Módulos do produto">
+  <defs>
+    <style>
+      .title{font:850 26px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .muted{font:500 13px Inter,Segoe UI,Arial;fill:#5A6878}
+      .card{fill:#fff;stroke:#D7E5EF;stroke-width:2}
+      .t{font:800 16px Inter,Segoe UI,Arial;fill:#0A1F3D}
+      .m{font:500 12px Inter,Segoe UI,Arial;fill:#5A6878}
+      .dot{animation:blink 2.8s ease-in-out infinite}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){.dot{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="330" rx="24" fill="#F4F8FB"/>
+  <text x="42" y="46" class="title">Módulos da plataforma</text>
+  <text x="42" y="72" class="muted">Frentes operacionais que podem ser ativadas de acordo com a realidade da cidade.</text>
+  <g transform="translate(42 110)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">PrevenCidade</text><text x="54" y="58" class="m">zeladoria urbana, infraestrutura e defesa civil</text></g>
+  <g transform="translate(430 110)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">DengueMap</text><text x="54" y="58" class="m">saúde pública, água parada e focos de mosquito</text></g>
+  <g transform="translate(818 110)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">ÁguaGuard</text><text x="54" y="58" class="m">vazamento, falta d’água e saneamento</text></g>
+  <g transform="translate(42 212)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">CuidaVila</text><text x="54" y="58" class="m">idosos, visitas e risco social</text></g>
+  <g transform="translate(430 212)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">AgroRadar Local</text><text x="54" y="58" class="m">estradas rurais, pontes e apoio à zona rural</text></g>
+  <g transform="translate(818 212)"><rect width="340" height="78" rx="16" class="card"/><circle class="dot" cx="32" cy="39" r="8" fill="#19A7A8"/><text x="54" y="36" class="t">Alertas Oficiais</text><text x="54" y="58" class="m">avisos públicos, risco, clima e orientações</text></g>
+</svg>

@@ -1,0 +1,17 @@
+<svg width="1200" height="130" viewBox="0 0 1200 130" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Rodapé CidadeOS AI">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1"><stop stop-color="#0A1F3D"/><stop offset="1" stop-color="#0E3A5E"/></linearGradient>
+    <style>
+      .title{font:850 24px Inter,Segoe UI,Arial;fill:#EAF3F8}
+      .muted{font:500 14px Inter,Segoe UI,Arial;fill:#B9CAD8}
+      .dot{animation:blink 2.4s ease-in-out infinite}
+      @keyframes blink{0%,100%{opacity:.45}50%{opacity:1}}
+      @media (prefers-reduced-motion: reduce){.dot{animation:none}}
+    </style>
+  </defs>
+  <rect width="1200" height="130" rx="24" fill="url(#g)"/>
+  <circle class="dot" cx="68" cy="65" r="7" fill="#36C7D0"/><circle class="dot" cx="94" cy="65" r="7" fill="#36C7D0"/><circle class="dot" cx="120" cy="65" r="7" fill="#36C7D0"/>
+  <text x="168" y="58" class="title">CidadeOS AI</text>
+  <text x="168" y="84" class="muted">plataforma de atendimento, protocolo e inteligência urbana.</text>
+  <text x="840" y="72" class="muted">© 2026 Mateus Paiva — todos os direitos reservados.</text>
+</svg>
