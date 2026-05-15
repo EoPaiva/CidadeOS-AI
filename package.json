@@ -1,0 +1,34 @@
+{
+  "name": "cidadeos-ai-fase2-5-evidencias-anexos-auditoria",
+  "version": "2.5.0",
+  "description": "CidadeOS AI — Fase 2.5 com gestão de evidências, galeria de anexos e auditoria operacional.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "check": "node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/utils.js && node --check public/app.js",
+    "validate": "npm run check",
+    "build": "node scripts/build-static.js",
+    "deploy:preview": "vercel",
+    "deploy:prod": "vercel --prod"
+  },
+  "keywords": [
+    "cidadeos",
+    "gestao-publica",
+    "ocorrencias",
+    "portal-governamental",
+    "transparencia",
+    "mvp",
+    "govtech",
+    "smart-city",
+    "servico-publico-digital",
+    "civic-tech"
+  ],
+  "author": "uPaiva",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
