@@ -133,7 +133,7 @@ function publicOccurrence(db, occurrence) {
     createdAt: serialized.createdAt,
     updatedAt: serialized.updatedAt,
     resolvedAt: serialized.resolvedAt,
-    attachments: serialized.attachments.filter((item) => ['PUBLIC','PUBLICA'].includes(String(item.visibility || '').toUpperCase()) && !item.archivedAt && !item.deletedAt).map((item) => ({ id: item.id, fileName: item.fileName, fileType: item.fileType, fileUrl: item.fileUrl, sizeBytes: item.sizeBytes, createdAt: item.createdAt })),
+    attachments: serialized.attachments.filter((item) => ['PUBLIC','PUBLICA'].includes(String(item.visibility || '').toUpperCase()) && !item.archivedAt && !item.deletedAt).map((item) => ({ id: item.id, fileName: item.fileName, fileType: item.fileType, fileUrl: item.fileUrl, sizeBytes: item.sizeBytes, source: item.source || 'registro', createdAt: item.createdAt })),
     publicHistory: serialized.history
       .filter((item) => item.publicMessage)
       .map((item) => ({ status: item.newStatus, publicMessage: item.publicMessage, createdAt: item.createdAt }))
@@ -245,10 +245,73 @@ function inferWhatsAppClassification(db, text = '', cityId = '') {
 function publicWhatsAppMessage(db, message) {
   if (!message) return null;
   const occurrence = message.occurrenceId ? db.occurrences.find((item) => item.id === message.occurrenceId) : null;
+  const media = localWhatsAppMediaState(message);
   return {
     ...message,
+    mediaId: media.mediaId || message.mediaId || '',
+    mediaMimeType: media.contentType || message.mediaMimeType || '',
+    mediaStorageBucket: media.bucket || message.mediaStorageBucket || '',
+    mediaStoragePath: media.storagePath || message.mediaStoragePath || '',
+    hasMedia: media.hasMedia,
+    mediaDownloadPending: media.pending,
+    mediaDownloadError: media.error || '',
     occurrence: occurrence ? { id: occurrence.id, protocol: occurrence.protocol, title: occurrence.title, status: occurrence.status } : null
   };
+}
+
+function mediaExtensionFromMime(mime = '') {
+  const value = String(mime || '').toLowerCase();
+  if (value.includes('jpeg')) return 'jpg';
+  if (value.includes('png')) return 'png';
+  if (value.includes('webp')) return 'webp';
+  if (value.includes('pdf')) return 'pdf';
+  if (value.includes('ogg')) return 'ogg';
+  if (value.includes('mpeg')) return 'mp3';
+  if (value.includes('mp4')) return 'mp4';
+  return 'bin';
+}
+
+function localWhatsAppMediaState(message = {}) {
+  const payload = message.payloadJson || {};
+  const raw = payload.raw || payload || {};
+  const storedMedia = payload.storedMedia || message.storedMedia || {};
+  const media = raw.image || raw.document || raw.audio || raw.video || {};
+  const mediaId = message.mediaId || payload.mediaId || storedMedia.mediaId || media.id || '';
+  const storagePath = message.mediaStoragePath || storedMedia.path || '';
+  const contentType = message.mediaMimeType || storedMedia.contentType || payload.mediaMimeType || media.mime_type || '';
+  return {
+    hasMedia: Boolean(mediaId || storagePath || message.hasMedia),
+    mediaId,
+    bucket: message.mediaStorageBucket || storedMedia.bucket || 'occurrence-attachments',
+    storagePath,
+    contentType,
+    sizeBytes: storedMedia.size || message.mediaSizeBytes || 0,
+    fileUrl: storedMedia.url || storedMedia.publicUrl || storagePath || '',
+    fileName: storedMedia.fileName || `whatsapp-${message.id || mediaId || Date.now()}.${mediaExtensionFromMime(contentType)}`,
+    pending: Boolean((mediaId || message.hasMedia) && !storagePath),
+    error: message.mediaDownloadError || message.errorMessage || storedMedia.reason || ''
+  };
+}
+
+function linkLocalWhatsAppMediaAttachment(db, message, occurrence, userId = null) {
+  const media = localWhatsAppMediaState(message);
+  if (!media.hasMedia) return { linked: false, skipped: true };
+  if (!media.storagePath && !media.fileUrl) {
+    addAudit(db, { cityId: occurrence.cityId, userId, action: 'WHATSAPP_MEDIA_ATTACHMENT_PENDING', entityType: 'WhatsAppMessage', entityId: message.id, metadata: { occurrenceId: occurrence.id, mediaId: media.mediaId, reason: media.error || 'Mídia aguardando download.' } });
+    return { linked: false, pending: true, reason: media.error || 'Mídia aguardando download.' };
+  }
+  const duplicate = db.attachments.find((item) => item.occurrenceId === occurrence.id && ((media.storagePath && item.storagePath === media.storagePath) || item.metadata?.whatsappMessageId === message.id));
+  if (duplicate) return { linked: false, duplicate: true, attachment: duplicate };
+  const attachment = {
+    id: uuid('att'), occurrenceId: occurrence.id, uploadedBy: userId, fileUrl: media.fileUrl || media.storagePath,
+    storageBucket: media.bucket, storagePath: media.storagePath || media.fileUrl, fileType: media.contentType || 'application/octet-stream',
+    fileName: media.fileName, visibility: 'PUBLIC', source: 'whatsapp', sizeBytes: media.sizeBytes || 0,
+    metadata: { source: 'whatsapp', whatsappMessageId: message.id, mediaId: media.mediaId, linkedAt: nowIso() },
+    archivedAt: null, deletedAt: null, createdAt: nowIso()
+  };
+  db.attachments.push(attachment);
+  addAudit(db, { cityId: occurrence.cityId, userId, action: 'WHATSAPP_MEDIA_LINKED_ATTACHMENT', entityType: 'Attachment', entityId: attachment.id, metadata: { occurrenceId: occurrence.id, messageId: message.id } });
+  return { linked: true, attachment };
 }
 
 function buildWhatsappPreparedReply(channel, kind, values = {}) {
@@ -916,14 +979,26 @@ async function handleApi(req, res, pathname) {
           const value = change.value || {};
           const messages = Array.isArray(value.messages) ? value.messages : [];
           for (const message of messages) {
-            const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || '[mensagem sem texto]';
+            const media = message.image || message.document || message.audio || message.video || null;
+            const text = message.text?.body || message.image?.caption || message.document?.caption || message.button?.text || message.interactive?.button_reply?.title || (media ? `[${message.type || 'midia'}] mídia recebida pelo WhatsApp` : '[mensagem sem texto]');
             const classification = inferWhatsAppClassification(db, text, cityId);
+            const payloadJson = {
+              ...message,
+              source: 'meta_webhook_local',
+              mediaId: media?.id || '',
+              mediaMimeType: media?.mime_type || '',
+              mediaSha256: media?.sha256 || '',
+              raw: message
+            };
             db.whatsappMessages.push({
               id: uuid('wa_msg'), cityId, channelId: channel?.id || null, occurrenceId: null,
               citizenPhone: message.from || '', direction: 'INBOUND', messageType: message.type || 'unknown', messageBody: text,
               metaMessageId: message.id || '', status: 'RECEBIDA_PENDENTE_TRIAGEM', processingStatus: 'PENDENTE_TRIAGEM',
               suggestedCategoryId: classification.categoryId, suggestedDepartmentId: classification.departmentId, suggestedPriority: classification.priority,
-              preparedReply: buildWhatsappPreparedReply(channel, 'moreInfo'), payloadJson: message, createdAt: nowIso(), updatedAt: nowIso()
+              preparedReply: buildWhatsappPreparedReply(channel, 'moreInfo'), payloadJson,
+              mediaId: payloadJson.mediaId, mediaMimeType: payloadJson.mediaMimeType, mediaStorageBucket: '', mediaStoragePath: '',
+              hasMedia: Boolean(payloadJson.mediaId), mediaDownloadError: payloadJson.mediaId ? 'Mídia recebida no webhook local; download real ocorre no modo Supabase/Vercel.' : '',
+              createdAt: nowIso(), updatedAt: nowIso()
             });
           }
         }
@@ -934,7 +1009,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, eventId: event.id });
   }
 
-  const whatsappMessageActionMatch = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/(create-occurrence|link-occurrence|status|reply)$/);
+  const whatsappMessageActionMatch = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/(create-occurrence|link-occurrence|send-prepared|status|reply)$/);
   if (whatsappMessageActionMatch && req.method === 'POST') {
     const messageId = whatsappMessageActionMatch[1];
     const actionName = whatsappMessageActionMatch[2];
@@ -944,6 +1019,25 @@ async function handleApi(req, res, pathname) {
       if (!message) throw Object.assign(new Error('Mensagem do WhatsApp não encontrada.'), { status: 404 });
       if (!userCanAccessCity(user, message.cityId)) throw Object.assign(new Error('Acesso restrito para esta cidade.'), { status: 403 });
       const channel = db.whatsappChannels.find((item) => item.id === message.channelId || item.cityId === message.cityId) || null;
+      if (actionName === 'send-prepared') {
+        const text = normalizeText(body.messageBody) || message.preparedReply || buildWhatsappPreparedReply(channel, 'moreInfo');
+        const outbound = {
+          id: uuid('wa_msg'), cityId: message.cityId, channelId: message.channelId, occurrenceId: message.occurrenceId || null,
+          citizenPhone: message.citizenPhone, direction: 'FAILED', messageType: 'text', messageBody: text,
+          metaMessageId: '', status: 'ERRO', processingStatus: 'ERRO', errorMessage: 'Envio real indisponível no servidor local sem WhatsApp Cloud API.',
+          createdAt: nowIso(), updatedAt: nowIso()
+        };
+        db.whatsappMessages.push(outbound);
+        addAudit(db, { cityId: message.cityId, userId: user.id, action: 'WHATSAPP_PREPARED_REPLY_LOCAL_FALLBACK', entityType: 'WhatsAppMessage', entityId: message.id, metadata: { outboundId: outbound.id } });
+        return { sent: false, fallback: true, error: outbound.errorMessage, outboundMessage: publicWhatsAppMessage(db, outbound) };
+      }
+      if (actionName === 'create-occurrence' && message.occurrenceId) {
+        const existing = db.occurrences.find((item) => item.id === message.occurrenceId);
+        if (existing) {
+          const mediaAttachment = linkLocalWhatsAppMediaAttachment(db, message, existing, user.id);
+          return { occurrence: serializeOccurrence(db, existing), message: publicWhatsAppMessage(db, message), preparedReply: message.preparedReply || '', mediaAttachment, alreadyConverted: true };
+        }
+      }
       if (actionName === 'status') {
         const allowed = ['RECEBIDA_PENDENTE_TRIAGEM','AGUARDANDO_INFORMACOES','ARQUIVADA','ERRO_PROCESSAMENTO'];
         const nextStatus = normalizeText(body.status).toUpperCase();
@@ -979,7 +1073,8 @@ async function handleApi(req, res, pathname) {
         message.updatedAt = nowIso();
         db.comments.push({ id: uuid('comment'), occurrenceId: target.id, userId: user.id, comment: `Mensagem do WhatsApp vinculada ao protocolo. Telefone: ${message.citizenPhone}. Conteúdo: ${message.messageBody}`, visibility: 'INTERNAL', createdAt: nowIso() });
         addAudit(db, { cityId: message.cityId, userId: user.id, action: 'WHATSAPP_MESSAGE_LINKED_OCCURRENCE', entityType: 'Occurrence', entityId: target.id, metadata: { messageId: message.id } });
-        return { occurrence: serializeOccurrence(db, target), message: publicWhatsAppMessage(db, message), preparedReply: message.preparedReply };
+        const mediaAttachment = linkLocalWhatsAppMediaAttachment(db, message, target, user.id);
+        return { occurrence: serializeOccurrence(db, target), message: publicWhatsAppMessage(db, message), preparedReply: message.preparedReply, mediaAttachment };
       }
       const classification = inferWhatsAppClassification(db, message.messageBody, message.cityId);
       const citizen = ensureCitizenFromWhatsApp(db, message.cityId, message.citizenPhone);
@@ -1015,7 +1110,8 @@ async function handleApi(req, res, pathname) {
         metaMessageId: '', status: 'PREPARADA_NAO_ENVIADA', processingStatus: 'AGUARDANDO_ENVIO_REAL_OU_MANUAL', createdAt: nowIso(), updatedAt: nowIso()
       });
       addAudit(db, { cityId: message.cityId, userId: user.id, action: 'WHATSAPP_MESSAGE_CONVERTED_OCCURRENCE', entityType: 'Occurrence', entityId: occurrence.id, metadata: { messageId: message.id, protocol } });
-      return { occurrence: serializeOccurrence(db, occurrence), message: publicWhatsAppMessage(db, message), preparedReply: message.preparedReply };
+      const mediaAttachment = linkLocalWhatsAppMediaAttachment(db, message, occurrence, user.id);
+      return { occurrence: serializeOccurrence(db, occurrence), message: publicWhatsAppMessage(db, message), preparedReply: message.preparedReply, mediaAttachment };
     });
     return sendJson(res, 200, { ok: true, ...result });
   }
@@ -1028,12 +1124,22 @@ async function handleApi(req, res, pathname) {
       const channel = db.whatsappChannels.find((item) => item.cityId === cityId) || null;
       const text = normalizeText(body.messageBody) || 'Mensagem de teste recebida pelo WhatsApp oficial.';
       const classification = inferWhatsAppClassification(db, text, cityId);
+      const payloadJson = { simulated: true };
+      if (body.mediaId || body.mediaStoragePath) {
+        payloadJson.mediaId = body.mediaId || uuid('wamedia');
+        payloadJson.mediaMimeType = body.mediaMimeType || 'image/jpeg';
+        payloadJson.storedMedia = body.mediaStoragePath ? { uploaded: true, bucket: 'occurrence-attachments', path: body.mediaStoragePath, contentType: payloadJson.mediaMimeType, size: Number(body.mediaSizeBytes || 0) } : { uploaded: false, reason: 'Mídia simulada aguardando download.' };
+      }
+      const media = localWhatsAppMediaState({ payloadJson });
       const message = {
         id: uuid('wa_msg'), cityId, channelId: channel?.id || null, occurrenceId: null,
-        citizenPhone: onlyDigits(body.citizenPhone) || '5511999990000', direction: 'INBOUND', messageType: 'text', messageBody: text,
+        citizenPhone: onlyDigits(body.citizenPhone) || '5511999990000', direction: 'INBOUND', messageType: media.hasMedia ? 'image' : 'text', messageBody: text,
         metaMessageId: `sim_${Date.now()}`, status: 'RECEBIDA_PENDENTE_TRIAGEM', processingStatus: 'PENDENTE_TRIAGEM',
         suggestedCategoryId: classification.categoryId, suggestedDepartmentId: classification.departmentId, suggestedPriority: classification.priority,
-        preparedReply: buildWhatsappPreparedReply(channel, 'moreInfo'), payloadJson: { simulated: true }, createdAt: nowIso(), updatedAt: nowIso()
+        preparedReply: buildWhatsappPreparedReply(channel, 'moreInfo'), payloadJson,
+        mediaId: media.mediaId, mediaMimeType: media.contentType, mediaStorageBucket: media.bucket, mediaStoragePath: media.storagePath,
+        hasMedia: media.hasMedia, mediaDownloadError: media.pending ? 'Mídia simulada aguardando download.' : '',
+        createdAt: nowIso(), updatedAt: nowIso()
       };
       db.whatsappMessages.push(message);
       addAudit(db, { cityId, userId: user.id, action: 'WHATSAPP_MESSAGE_SIMULATED', entityType: 'WhatsAppMessage', entityId: message.id });

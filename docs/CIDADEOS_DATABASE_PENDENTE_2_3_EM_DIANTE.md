@@ -52,3 +52,15 @@ alter table if exists public.whatsapp_channels
 create index if not exists idx_whatsapp_messages_media_storage_path on public.whatsapp_messages(media_storage_path);
 create index if not exists idx_whatsapp_messages_type_created on public.whatsapp_messages(message_type, created_at desc);
 ```
+
+## Fase 2.8 — Vínculo automático de mídia WhatsApp com evidências
+
+Sem SQL obrigatório novo.
+
+A Fase 2.8 reutiliza:
+
+- `public.whatsapp_messages.media_storage_bucket`, `media_storage_path` e `media_downloaded_at` da Fase 2.7.
+- `public.occurrence_attachments.source` e `metadata` da Fase 2.5 para marcar evidências vindas do WhatsApp.
+- bucket `occurrence-attachments`, ou `WHATSAPP_MEDIA_BUCKET` quando configurado.
+
+O backend foi preparado com fallback: se `source`/`metadata` ainda não existirem em `occurrence_attachments`, o vínculo do anexo tenta gravar os campos básicos sem bloquear a conversão da mensagem em protocolo. Não aplicar nada agora; manter acumulado até o pedido explícito do SQL completo.

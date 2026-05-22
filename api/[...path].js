@@ -38,11 +38,12 @@ function send(res, status, data) {
   res.end(JSON.stringify(data));
 }
 async function readBody(req) {
-  if (req.method === 'GET' || req.method === 'HEAD') return {};
+  if (req.method === 'GET' || req.method === 'HEAD') return { body: {}, rawBodyText: '' };
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  if (!chunks.length) return {};
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return {}; }
+  if (!chunks.length) return { body: {}, rawBodyText: '' };
+  const rawBodyText = Buffer.concat(chunks).toString('utf8');
+  try { return { body: JSON.parse(rawBodyText), rawBodyText }; } catch { return { body: {}, rawBodyText }; }
 }
 function requireConfig(res) {
   if (!SUPABASE_URL || !SERVICE_KEY) {
@@ -82,34 +83,39 @@ function parseDataUrl(dataUrl = '') {
   if (!buffer.length || buffer.length > MAX_ATTACHMENT_BYTES) throw Object.assign(new Error(`Arquivo muito grande. Limite atual: ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)} MB.`), { status: 400 });
   return { mime, ext: allowed.get(mime), buffer, sizeBytes: buffer.length };
 }
-async function storageUpload(path, buffer, mime) {
-  const url = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/${ATTACHMENT_BUCKET}/${path}`;
+async function storageUploadToBucket(bucket, path, buffer, mime) {
+  const url = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/${bucket}/${path}`;
   const response = await fetch(url, { method: 'POST', headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': mime, 'x-upsert': 'false', 'Cache-Control': '3600' }, body: buffer });
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
   if (!response.ok) throw new Error(data?.message || `Falha no upload do anexo: HTTP ${response.status}`);
   return data;
 }
-async function signedAttachmentUrl(storagePath) {
+async function storageUpload(path, buffer, mime) {
+  return storageUploadToBucket(ATTACHMENT_BUCKET, path, buffer, mime);
+}
+async function signedAttachmentUrl(storagePath, bucket = ATTACHMENT_BUCKET) {
   if (!storagePath) return '';
   try {
-    const url = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/sign/${ATTACHMENT_BUCKET}/${storagePath}`;
+    const url = `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/sign/${bucket}/${storagePath}`;
     const response = await fetch(url, { method: 'POST', headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresIn: 60 * 60 * 24 }) });
     const text = await response.text();
     const data = text ? JSON.parse(text) : null;
-    if (!response.ok) return `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/${ATTACHMENT_BUCKET}/${storagePath}`;
+    if (!response.ok) return `${SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object/${bucket}/${storagePath}`;
     return data?.signedURL ? `${SUPABASE_URL.replace(/\/$/, '')}${data.signedURL}` : '';
   } catch { return ''; }
 }
 async function attachmentFromDb(a) {
   const storagePath = a.storage_path || '';
+  const storageBucket = a.storage_bucket || ATTACHMENT_BUCKET;
   return {
     id: a.id,
     occurrenceId: a.occurrence_id,
     cityId: a.city_id,
     uploadedBy: a.uploaded_by,
-    fileUrl: await signedAttachmentUrl(storagePath) || a.file_url || '',
-    storageBucket: a.storage_bucket || ATTACHMENT_BUCKET,
+    fileUrl: await signedAttachmentUrl(storagePath, storageBucket) || a.file_url || '',
+    storageBucket,
     storagePath,
     fileType: a.file_type || '',
     fileName: a.file_name || 'anexo',
@@ -202,7 +208,7 @@ function publicOccurrence(occ) {
     category: occ.category?.name || '', subcategory: occ.subcategory?.name || '', neighborhood: occ.neighborhood?.name || '', department: occ.department?.name || '',
     priority: occ.priority, status: occ.status, address: occ.address, referencePoint: occ.referencePoint, publicMessage: occ.publicMessage,
     slaDueAt: occ.slaDueAt, createdAt: occ.createdAt, updatedAt: occ.updatedAt, resolvedAt: occ.resolvedAt,
-    attachments: (occ.attachments || []).filter(a => a.visibility === 'PUBLICA' || a.visibility === 'PUBLIC').map(a => ({ id: a.id, fileName: a.fileName, fileType: a.fileType, fileUrl: a.fileUrl, sizeBytes: a.sizeBytes, createdAt: a.createdAt })),
+    attachments: (occ.attachments || []).filter(a => a.visibility === 'PUBLICA' || a.visibility === 'PUBLIC').map(a => ({ id: a.id, fileName: a.fileName, fileType: a.fileType, fileUrl: a.fileUrl, sizeBytes: a.sizeBytes, source: a.source || 'registro', createdAt: a.createdAt })),
     publicHistory: (occ.history || []).filter(h => h.publicMessage).map(h => ({ status: h.newStatus, publicMessage: h.publicMessage, createdAt: h.createdAt }))
   };
 }
@@ -254,7 +260,13 @@ function channelFromDb(ch) {
   return { id: ch.id, cityId: ch.city_id, channelName: ch.channel_name, officialPhone: ch.official_phone || '', defaultDepartmentId: ch.default_department_id, businessPortfolioId: ch.business_portfolio_id || '', wabaIdMasked: mask(ch.waba_id), phoneNumberIdMasked: mask(ch.phone_number_id), appIdMasked: mask(ch.app_id), accessTokenMasked: mask(ch.access_token_encrypted), appSecretMasked: mask(ch.app_secret_encrypted), webhookVerifyTokenMasked: mask(ch.verify_token_encrypted), templatesJson: ch.templates_json || {}, businessHoursJson: ch.business_hours_json || {}, defaultWelcomeMessage: ch.default_welcome_message || '', protocolCreatedMessage: ch.protocol_created_message || '', statusUpdatedMessage: ch.status_updated_message || '', enabled: ch.enabled, connectionStatus: ch.connection_status, lastVerifiedAt: ch.last_verified_at, lastError: ch.last_error, webhookUrl: ch.webhook_url || `/api/webhooks/whatsapp/${ch.city_id}`, updatedAt: ch.updated_at };
 }
 function messageFromDb(m, occurrence = null) {
-  return { id: m.id, cityId: m.city_id, channelId: m.channel_id, conversationId: m.conversation_id, occurrenceId: m.occurrence_id, citizenPhone: m.citizen_phone, direction: directionFromDb[m.direction] || m.direction, status: processingFromDb[m.processing_status] || m.processing_status, processingStatus: processingFromDb[m.processing_status] || m.processing_status, messageType: m.message_type || 'text', messageBody: m.message_body || '', preparedReply: m.prepared_response || '', metaMessageId: m.meta_message_id || '', payloadJson: m.payload_json || {}, errorMessage: m.error_message || '', createdAt: m.created_at, processedAt: m.processed_at, occurrence };
+  const payload = m.payload_json || {};
+  const storedMedia = payload.storedMedia || {};
+  const mediaStorageBucket = m.media_storage_bucket || storedMedia.bucket || '';
+  const mediaStoragePath = m.media_storage_path || storedMedia.path || '';
+  const mediaMimeType = storedMedia.contentType || payload.mediaMimeType || payload.raw?.image?.mime_type || payload.raw?.document?.mime_type || payload.raw?.audio?.mime_type || payload.raw?.video?.mime_type || '';
+  const mediaId = payload.mediaId || payload.raw?.image?.id || payload.raw?.document?.id || payload.raw?.audio?.id || payload.raw?.video?.id || '';
+  return { id: m.id, cityId: m.city_id, channelId: m.channel_id, conversationId: m.conversation_id, occurrenceId: m.occurrence_id, citizenPhone: m.citizen_phone, direction: directionFromDb[m.direction] || m.direction, status: processingFromDb[m.processing_status] || m.processing_status, processingStatus: processingFromDb[m.processing_status] || m.processing_status, messageType: m.message_type || 'text', messageBody: m.message_body || '', preparedReply: m.prepared_response || '', metaMessageId: m.meta_message_id || '', payloadJson: payload, errorMessage: m.error_message || '', mediaId, mediaMimeType, mediaStorageBucket, mediaStoragePath, mediaDownloadedAt: m.media_downloaded_at || null, hasMedia: Boolean(mediaId || mediaStoragePath), mediaDownloadPending: Boolean(mediaId && !mediaStoragePath), mediaDownloadError: mediaId && !mediaStoragePath ? (m.error_message || storedMedia.reason || '') : '', createdAt: m.created_at, processedAt: m.processed_at, occurrence };
 }
 function inferCategory(categories, text = '') {
   const s = String(text).toLowerCase();
@@ -389,9 +401,104 @@ async function uploadWhatsAppMediaToStorage({ cityId, messageId, mediaId, channe
   const ext = extensionFromMime(contentType);
   const safeMessageId = String(messageId || mediaId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '');
   const filePath = `${cityId}/whatsapp/${new Date().toISOString().slice(0, 10)}/${safeMessageId}.${ext}`;
-  const { error } = await supabase.storage.from(WHATSAPP_MEDIA_BUCKET).upload(filePath, downloaded.buffer, { contentType, upsert: false });
-  if (error) throw new Error(error.message || 'Falha no upload da mídia para o Supabase Storage.');
+  await storageUploadToBucket(WHATSAPP_MEDIA_BUCKET, filePath, downloaded.buffer, contentType);
   return { uploaded: true, bucket: WHATSAPP_MEDIA_BUCKET, path: filePath, contentType, size: downloaded.size, meta: info };
+}
+
+function whatsappMediaFromMessageRow(message = {}) {
+  const payload = message.payload_json || {};
+  const raw = payload.raw || {};
+  const storedMedia = payload.storedMedia || {};
+  const media = raw.image || raw.document || raw.audio || raw.video || {};
+  const mediaId = payload.mediaId || storedMedia.mediaId || media.id || '';
+  const contentType = storedMedia.contentType || payload.mediaMimeType || media.mime_type || '';
+  const storagePath = message.media_storage_path || storedMedia.path || '';
+  const bucket = message.media_storage_bucket || storedMedia.bucket || WHATSAPP_MEDIA_BUCKET;
+  return {
+    hasMedia: Boolean(mediaId || storagePath),
+    mediaId,
+    bucket,
+    storagePath,
+    contentType,
+    size: storedMedia.size || 0,
+    sha256: payload.mediaSha256 || media.sha256 || '',
+    metaMessageId: message.meta_message_id || '',
+    pendingReason: storedMedia.reason || message.error_message || 'Midia recebida pelo WhatsApp, mas ainda nao baixada para o Storage.'
+  };
+}
+
+function whatsappAttachmentName(message = {}, media = {}) {
+  const ext = extensionFromMime(media.contentType || message.message_type || '');
+  const safeMessageId = String(message.id || media.mediaId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '');
+  return `whatsapp-${safeMessageId}.${ext}`;
+}
+
+function isMissingAttachmentMetadataColumn(error) {
+  const text = String(error?.message || error || '').toLowerCase();
+  return text.includes('occurrence_attachments') && (text.includes('source') || text.includes('metadata') || text.includes('schema cache') || text.includes('column'));
+}
+
+async function insertWhatsAppAttachment(record) {
+  try {
+    const rows = await supa('occurrence_attachments', { method: 'POST', body: JSON.stringify([record]) });
+    return rows[0];
+  } catch (error) {
+    if (!isMissingAttachmentMetadataColumn(error)) throw error;
+    const fallback = { ...record };
+    delete fallback.source;
+    delete fallback.metadata;
+    const rows = await supa('occurrence_attachments', { method: 'POST', body: JSON.stringify([fallback]) });
+    return rows[0];
+  }
+}
+
+async function linkWhatsAppMediaAsAttachment({ message, occurrence, userId = null, visibility = 'publica' }) {
+  const media = whatsappMediaFromMessageRow(message);
+  if (!media.hasMedia) return { linked: false, skipped: true };
+  if (!media.storagePath) {
+    await audit(occurrence.city_id, userId, 'WHATSAPP_MEDIA_ATTACHMENT_PENDING', 'WhatsAppMessage', message.id, {
+      occurrenceId: occurrence.id,
+      mediaId: media.mediaId,
+      reason: media.pendingReason
+    });
+    return { linked: false, pending: true, reason: media.pendingReason };
+  }
+  const existing = await supa(`occurrence_attachments?occurrence_id=eq.${encodeURIComponent(occurrence.id)}&storage_path=eq.${encodeURIComponent(media.storagePath)}&select=*&limit=1`);
+  if (existing[0]) {
+    await audit(occurrence.city_id, userId, 'WHATSAPP_MEDIA_ATTACHMENT_ALREADY_LINKED', 'OccurrenceAttachment', existing[0].id, {
+      occurrenceId: occurrence.id,
+      messageId: message.id,
+      storagePath: media.storagePath
+    });
+    return { linked: false, duplicate: true, attachment: await attachmentFromDb(existing[0]) };
+  }
+  const row = await insertWhatsAppAttachment({
+    occurrence_id: occurrence.id,
+    city_id: occurrence.city_id,
+    uploaded_by: userId,
+    file_url: media.storagePath,
+    storage_bucket: media.bucket,
+    storage_path: media.storagePath,
+    file_type: media.contentType || 'application/octet-stream',
+    file_name: whatsappAttachmentName(message, media),
+    file_size_bytes: media.size || null,
+    visibility: String(visibility || 'publica').toLowerCase(),
+    source: 'whatsapp',
+    metadata: {
+      source: 'whatsapp',
+      whatsappMessageId: message.id,
+      metaMessageId: media.metaMessageId,
+      mediaId: media.mediaId,
+      mediaSha256: media.sha256,
+      linkedAt: new Date().toISOString()
+    }
+  });
+  await audit(occurrence.city_id, userId, 'WHATSAPP_MEDIA_LINKED_ATTACHMENT', 'OccurrenceAttachment', row?.id || null, {
+    occurrenceId: occurrence.id,
+    messageId: message.id,
+    storagePath: media.storagePath
+  });
+  return { linked: true, attachment: row ? await attachmentFromDb(row) : null };
 }
 async function sendWhatsAppTemplate(rawChannel, to, templateName, languageCode = 'pt_BR', components = []) {
   const channel = whatsappRawConfig(rawChannel);
@@ -478,7 +585,7 @@ export default async function handler(req, res) {
   if (!requireConfig(res)) return;
   const raw = req.url.split('?')[0].replace(/^\/api\/?/, '');
   const pathname = `/api/${raw}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/api';
-  const body = await readBody(req);
+  const { body, rawBodyText } = await readBody(req);
   try {
     const boot = await bootstrapData();
     const cityId = body.cityId || new URL(req.url, 'https://x.local').searchParams.get('cityId') || boot.city.id;
@@ -576,21 +683,25 @@ export default async function handler(req, res) {
                 channel,
                 mimeType: item.mediaMimeType
               });
+              const mediaPatch = {
+                media_storage_bucket: storedMedia.bucket || WHATSAPP_MEDIA_BUCKET,
+                media_storage_path: storedMedia.path || null,
+                media_downloaded_at: storedMedia.uploaded ? new Date().toISOString() : null,
+                payload_json: { ...(savedMessage.payload_json || {}), storedMedia }
+              };
               await supa(`whatsapp_messages?id=eq.${savedMessage.id}`, {
                 method: 'PATCH',
-                body: JSON.stringify({
-                  media_storage_bucket: storedMedia.bucket || WHATSAPP_MEDIA_BUCKET,
-                  media_storage_path: storedMedia.path || null,
-                  media_downloaded_at: storedMedia.uploaded ? new Date().toISOString() : null,
-                  payload_json: { ...(savedMessage.payload_json || {}), storedMedia }
-                })
+                body: JSON.stringify(mediaPatch)
               }).catch(() => {});
+              Object.assign(savedMessage, mediaPatch);
               await audit(hookCityId, null, 'WHATSAPP_MEDIA_STORED', 'WhatsAppMessage', savedMessage.id, storedMedia);
             } catch (mediaError) {
+              const mediaErrorPatch = { error_message: `Mídia recebida, mas não baixada: ${mediaError.message}` };
               await supa(`whatsapp_messages?id=eq.${savedMessage.id}`, {
                 method: 'PATCH',
-                body: JSON.stringify({ error_message: `Mídia recebida, mas não baixada: ${mediaError.message}` })
+                body: JSON.stringify(mediaErrorPatch)
               }).catch(() => {});
+              Object.assign(savedMessage, mediaErrorPatch);
               await audit(hookCityId, null, 'WHATSAPP_MEDIA_STORE_FAILED', 'WhatsAppMessage', savedMessage.id, { error: mediaError.message, mediaId: item.mediaId });
             }
           }
@@ -723,21 +834,25 @@ export default async function handler(req, res) {
                 channel,
                 mimeType: item.mediaMimeType
               });
+              const mediaPatch = {
+                media_storage_bucket: storedMedia.bucket || WHATSAPP_MEDIA_BUCKET,
+                media_storage_path: storedMedia.path || null,
+                media_downloaded_at: storedMedia.uploaded ? new Date().toISOString() : null,
+                payload_json: { ...(savedMessage.payload_json || {}), storedMedia }
+              };
               await supa(`whatsapp_messages?id=eq.${savedMessage.id}`, {
                 method: 'PATCH',
-                body: JSON.stringify({
-                  media_storage_bucket: storedMedia.bucket || WHATSAPP_MEDIA_BUCKET,
-                  media_storage_path: storedMedia.path || null,
-                  media_downloaded_at: storedMedia.uploaded ? new Date().toISOString() : null,
-                  payload_json: { ...(savedMessage.payload_json || {}), storedMedia }
-                })
+                body: JSON.stringify(mediaPatch)
               }).catch(() => {});
+              Object.assign(savedMessage, mediaPatch);
               await audit(hookCityId, null, 'WHATSAPP_MEDIA_STORED', 'WhatsAppMessage', savedMessage.id, storedMedia);
             } catch (mediaError) {
+              const mediaErrorPatch = { error_message: `Mídia recebida, mas não baixada: ${mediaError.message}` };
               await supa(`whatsapp_messages?id=eq.${savedMessage.id}`, {
                 method: 'PATCH',
-                body: JSON.stringify({ error_message: `Mídia recebida, mas não baixada: ${mediaError.message}` })
+                body: JSON.stringify(mediaErrorPatch)
               }).catch(() => {});
+              Object.assign(savedMessage, mediaErrorPatch);
               await audit(hookCityId, null, 'WHATSAPP_MEDIA_STORE_FAILED', 'WhatsAppMessage', savedMessage.id, { error: mediaError.message, mediaId: item.mediaId });
             }
           }
@@ -971,6 +1086,30 @@ export default async function handler(req, res) {
       await audit(user.cityId || cityId, user.id, result.sent ? 'WHATSAPP_REAL_MESSAGE_SENT' : 'WHATSAPP_REAL_MESSAGE_FAILED', 'WhatsAppMessage', rows[0]?.id || null, { to: normalizeWhatsAppPhone(to), occurrenceId: body.occurrenceId || null, result });
       return ok(res, { ...result, message: messageFromDb(rows[0]) });
     }
+    if (pathname === '/api/whatsapp/send-template' && req.method === 'POST') {
+      const channel = (await supa(`whatsapp_channels?city_id=eq.${user.cityId || cityId}&select=*&limit=1`))[0];
+      const to = body.to || body.citizenPhone || '';
+      const templateName = body.templateName || body.name || '';
+      const languageCode = body.languageCode || 'pt_BR';
+      const components = Array.isArray(body.components) ? body.components : [];
+      const result = await sendWhatsAppTemplate(channel, to, templateName, languageCode, components);
+      const rows = await supa('whatsapp_messages', { method: 'POST', body: JSON.stringify([{
+        city_id: user.cityId || cityId,
+        channel_id: channel?.id || null,
+        occurrence_id: body.occurrenceId || null,
+        citizen_phone: normalizeWhatsAppPhone(to),
+        direction: result.sent ? 'sent' : 'failed',
+        processing_status: result.sent ? 'novo' : 'erro',
+        message_type: 'template',
+        message_body: templateName ? `Template WhatsApp: ${templateName}` : 'Template WhatsApp',
+        meta_message_id: result.metaMessageId || '',
+        payload_json: { templateName, languageCode, components, meta: result.meta || {} },
+        error_message: result.error || null,
+        processed_at: new Date().toISOString()
+      }]) });
+      await audit(user.cityId || cityId, user.id, result.sent ? 'WHATSAPP_TEMPLATE_SENT' : 'WHATSAPP_TEMPLATE_FAILED', 'WhatsAppMessage', rows[0]?.id || null, { to: normalizeWhatsAppPhone(to), occurrenceId: body.occurrenceId || null, templateName, result });
+      return ok(res, { ...result, message: messageFromDb(rows[0]) });
+    }
     const waSendPrepared = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/send-prepared$/);
     if (waSendPrepared && req.method === 'POST') {
       const msg = (await supa(`whatsapp_messages?id=eq.${waSendPrepared[1]}&select=*&limit=1`))[0];
@@ -1007,14 +1146,25 @@ export default async function handler(req, res) {
     if (waCreate && req.method === 'POST') {
       const msg = (await supa(`whatsapp_messages?id=eq.${waCreate[1]}&select=*&limit=1`))[0];
       if (!msg) return fail(res, 404, 'Mensagem não encontrada.');
+      if (msg.occurrence_id) {
+        const existingOcc = (await supa(`occurrences?id=eq.${encodeURIComponent(msg.occurrence_id)}&select=*&limit=1`))[0];
+        if (existingOcc) {
+          const mediaAttachment = await linkWhatsAppMediaAsAttachment({ message: msg, occurrence: existingOcc, userId: user.id, visibility: 'publica' });
+          const [serialized] = await serializeRows([existingOcc], existingOcc.city_id);
+          return ok(res, { occurrence: serialized, message: messageFromDb(msg, serialized), mediaAttachment, alreadyConverted: true });
+        }
+      }
       const cats = (await supa('occurrence_categories?active=eq.true&select=*')).map(categoryFromDb);
       const [cat, pri] = inferCategory(cats, msg.message_body);
       const categoryRow = await supa(`occurrence_categories?id=eq.${cat.id}&select=*`).then(r => r[0]);
       const occRows = await supa('occurrences', { method: 'POST', body: JSON.stringify([{ city_id: msg.city_id, title: 'Ocorrência recebida pelo WhatsApp', description: msg.message_body || '', category_id: cat.id, department_id: categoryRow?.default_department_id || null, priority: dbPriority(pri), status: 'recebido', origin: 'whatsapp', source_channel: 'whatsapp', citizen_phone: msg.citizen_phone, reference_point: 'Relato recebido pelo WhatsApp', public_visibility: true, sla_due_at: computeSla(pri), public_message: 'Ocorrência registrada a partir do canal oficial de WhatsApp.' }]) });
       const occ = occRows[0];
-      await supa(`whatsapp_messages?id=eq.${msg.id}`, { method: 'PATCH', body: JSON.stringify({ processing_status: 'convertido_ocorrencia', occurrence_id: occ.id, prepared_response: `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`, processed_at: new Date().toISOString() }) });
+      const messagePatch = { processing_status: 'convertido_ocorrencia', occurrence_id: occ.id, prepared_response: `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`, processed_at: new Date().toISOString() };
+      const updatedRows = await supa(`whatsapp_messages?id=eq.${msg.id}`, { method: 'PATCH', body: JSON.stringify(messagePatch) });
+      const updatedMsg = updatedRows[0] || { ...msg, ...messagePatch };
       await supa('whatsapp_occurrence_links', { method: 'POST', body: JSON.stringify([{ city_id: msg.city_id, whatsapp_message_id: msg.id, occurrence_id: occ.id, created_by: user.id }]) });
       await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{ occurrence_id: occ.id, city_id: occ.city_id, new_status: 'recebido', public_message: occ.public_message, visibility: 'publica' }]) });
+      const mediaAttachment = await linkWhatsAppMediaAsAttachment({ message: updatedMsg, occurrence: occ, userId: user.id, visibility: 'publica' });
       if (body.sendProtocol === true) {
         const channel = (await supa(`whatsapp_channels?city_id=eq.${msg.city_id}&select=*&limit=1`))[0];
         const text = `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`;
@@ -1022,16 +1172,22 @@ export default async function handler(req, res) {
         await audit(msg.city_id, user.id, result.sent ? 'WHATSAPP_PROTOCOL_SENT' : 'WHATSAPP_PROTOCOL_SEND_FAILED', 'Occurrence', occ.id, { messageId: msg.id, result });
       }
       const [serialized] = await serializeRows([occ], occ.city_id);
-      return ok(res, { occurrence: serialized, message: messageFromDb({ ...msg, processing_status: 'convertido_ocorrencia', occurrence_id: occ.id, prepared_response: `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.` }, serialized) });
+      return ok(res, { occurrence: serialized, message: messageFromDb(updatedMsg, serialized), mediaAttachment });
     }
     const waLink = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/link-occurrence$/);
     if (waLink && req.method === 'POST') {
       const occ = (await supa(`occurrences?protocol=eq.${encodeURIComponent(body.protocol || '')}&select=*&limit=1`))[0];
       if (!occ) return fail(res, 404, 'Protocolo não encontrado.');
-      const msgRows = await supa(`whatsapp_messages?id=eq.${waLink[1]}`, { method: 'PATCH', body: JSON.stringify({ processing_status: 'vinculado_protocolo', occurrence_id: occ.id, processed_at: new Date().toISOString() }) });
+      const msg = (await supa(`whatsapp_messages?id=eq.${waLink[1]}&select=*&limit=1`))[0];
+      if (!msg) return fail(res, 404, 'Mensagem não encontrada.');
+      if (msg.city_id !== occ.city_id) return fail(res, 403, 'Mensagem e protocolo pertencem a cidades diferentes.');
+      const messagePatch = { processing_status: 'vinculado_protocolo', occurrence_id: occ.id, processed_at: new Date().toISOString() };
+      const msgRows = await supa(`whatsapp_messages?id=eq.${waLink[1]}`, { method: 'PATCH', body: JSON.stringify(messagePatch) });
+      const updatedMsg = msgRows[0] || { ...msg, ...messagePatch };
       await supa('whatsapp_occurrence_links', { method: 'POST', body: JSON.stringify([{ city_id: occ.city_id, whatsapp_message_id: waLink[1], occurrence_id: occ.id, link_type: 'linked_to_existing', created_by: user.id }]) });
+      const mediaAttachment = await linkWhatsAppMediaAsAttachment({ message: updatedMsg, occurrence: occ, userId: user.id, visibility: 'publica' });
       const [serialized] = await serializeRows([occ], occ.city_id);
-      return ok(res, { occurrence: serialized, message: messageFromDb(msgRows[0], serialized) });
+      return ok(res, { occurrence: serialized, message: messageFromDb(updatedMsg, serialized), mediaAttachment });
     }
     return fail(res, 404, 'Rota não encontrada no modo Supabase compartilhado.');
   } catch (error) {

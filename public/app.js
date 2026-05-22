@@ -268,6 +268,58 @@ function demoPublicOccurrence(db, occ) {
   const s = demoSerializeOccurrence(db, occ);
   return { protocol: s.protocol, title: s.title, description: s.description, category: s.category?.name || '', subcategory: s.subcategory?.name || '', neighborhood: s.neighborhood?.name || '', department: s.department?.name || '', priority: s.priority, status: s.status, address: s.address, referencePoint: s.referencePoint, publicMessage: s.publicMessage, slaDueAt: s.slaDueAt, createdAt: s.createdAt, updatedAt: s.updatedAt, resolvedAt: s.resolvedAt, attachments: (s.attachments || []).filter(a => ['PUBLIC','PUBLICA'].includes(String(a.visibility || '').toUpperCase()) && !a.archivedAt && !a.deletedAt), publicHistory: s.history.filter(h => h.publicMessage).map(h => ({ status: h.newStatus, publicMessage: h.publicMessage, createdAt: h.createdAt })) };
 }
+function mediaExtensionFromMime(mime = '') {
+  const value = String(mime || '').toLowerCase();
+  if (value.includes('jpeg')) return 'jpg';
+  if (value.includes('png')) return 'png';
+  if (value.includes('webp')) return 'webp';
+  if (value.includes('pdf')) return 'pdf';
+  if (value.includes('ogg')) return 'ogg';
+  if (value.includes('mpeg')) return 'mp3';
+  if (value.includes('mp4')) return 'mp4';
+  return 'bin';
+}
+function whatsappMessageMediaState(message = {}) {
+  const payload = message.payloadJson || message.payload_json || {};
+  const raw = payload.raw || payload || {};
+  const storedMedia = payload.storedMedia || message.storedMedia || {};
+  const media = raw.image || raw.document || raw.audio || raw.video || {};
+  const mediaId = message.mediaId || payload.mediaId || storedMedia.mediaId || media.id || '';
+  const storagePath = message.mediaStoragePath || message.media_storage_path || storedMedia.path || '';
+  const contentType = message.mediaMimeType || storedMedia.contentType || payload.mediaMimeType || media.mime_type || '';
+  return {
+    hasMedia: Boolean(mediaId || storagePath || message.hasMedia),
+    mediaId,
+    storagePath,
+    bucket: message.mediaStorageBucket || message.media_storage_bucket || storedMedia.bucket || 'occurrence-attachments',
+    contentType,
+    sizeBytes: storedMedia.size || message.mediaSizeBytes || 0,
+    fileUrl: storedMedia.url || storedMedia.publicUrl || storagePath || '',
+    fileName: storedMedia.fileName || `whatsapp-${message.id || mediaId || Date.now()}.${mediaExtensionFromMime(contentType)}`,
+    pending: Boolean((mediaId || message.hasMedia) && !storagePath),
+    error: message.mediaDownloadError || message.errorMessage || message.error_message || storedMedia.reason || ''
+  };
+}
+function demoLinkWhatsAppMediaAttachment(db, message, occurrence, userId = null) {
+  const media = whatsappMessageMediaState(message);
+  if (!media.hasMedia) return { linked: false, skipped: true };
+  if (!media.storagePath && !media.fileUrl) {
+    db.auditLogs.push({ id: demoUuid('audit'), cityId: occurrence.cityId, userId, action: 'WHATSAPP_MEDIA_ATTACHMENT_PENDING', entityType: 'WhatsAppMessage', entityId: message.id, metadata: { occurrenceId: occurrence.id, mediaId: media.mediaId, reason: media.error || 'Mídia aguardando download.' }, createdAt: demoNowIso() });
+    return { linked: false, pending: true, reason: media.error || 'Mídia aguardando download.' };
+  }
+  const duplicate = db.attachments.find(att => att.occurrenceId === occurrence.id && ((media.storagePath && att.storagePath === media.storagePath) || att.metadata?.whatsappMessageId === message.id));
+  if (duplicate) return { linked: false, duplicate: true, attachment: duplicate };
+  const attachment = {
+    id: demoUuid('att'), occurrenceId: occurrence.id, uploadedBy: userId, fileUrl: media.fileUrl || media.storagePath,
+    storageBucket: media.bucket, storagePath: media.storagePath || media.fileUrl, fileType: media.contentType || 'application/octet-stream',
+    fileName: media.fileName, visibility: 'PUBLIC', source: 'whatsapp', sizeBytes: media.sizeBytes || 0,
+    metadata: { source: 'whatsapp', whatsappMessageId: message.id, mediaId: media.mediaId, linkedAt: demoNowIso() },
+    archivedAt: null, deletedAt: null, createdAt: demoNowIso()
+  };
+  db.attachments.push(attachment);
+  db.auditLogs.push({ id: demoUuid('audit'), cityId: occurrence.cityId, userId, action: 'WHATSAPP_MEDIA_LINKED_ATTACHMENT', entityType: 'Attachment', entityId: attachment.id, metadata: { occurrenceId: occurrence.id, messageId: message.id }, createdAt: demoNowIso() });
+  return { linked: true, attachment };
+}
 function demoMetrics(db, rows) {
   const open = rows.filter(x => !['RESOLVIDO','CANCELADO','DUPLICADO','ARQUIVADO'].includes(x.status));
   const countBy = (fn) => Object.entries(rows.reduce((acc, row) => { const k = fn(row) || 'Não informado'; acc[k] = (acc[k] || 0) + 1; return acc; }, {})).map(([label, value]) => ({ label, value }));
@@ -360,13 +412,60 @@ async function demoRequest(path, options = {}) {
   if (pathname === '/api/whatsapp/config' && method === 'GET') return { ok: true, channel: db.whatsappChannels[0], events: db.whatsappWebhookEvents, messages: db.whatsappMessages.map(m => ({ ...m, occurrence: db.occurrences.find(o => o.id === m.occurrenceId) ? demoSerializeOccurrence(db, db.occurrences.find(o => o.id === m.occurrenceId)) : null })), triage: { waitingInfo: db.whatsappMessages.filter(m => m.status === 'AGUARDANDO_INFORMACOES').length }, completeness: { filled: 6, total: 6, percent: 100 }, previewMode: true };
   if (pathname === '/api/whatsapp/config' && method === 'PUT') { db.whatsappChannels[0] = { ...db.whatsappChannels[0], ...body, cityId: db.cities[0].id, updatedAt: demoNowIso(), connectionStatus: 'MODO_DEMO_ONLINE' }; return save({ ok: true, channel: db.whatsappChannels[0], previewMode: true }); }
   if (pathname === '/api/whatsapp/test') return { ok: true, message: 'Configuração validada no modo demonstrativo online.', previewMode: true };
-  if (pathname === '/api/whatsapp/simulate-message' && method === 'POST') { const sug = demoSuggestFromMessage(db, body.messageBody); const msg = { id: demoUuid('wam'), cityId: db.cities[0].id, channelId: db.whatsappChannels[0].id, citizenPhone: body.citizenPhone || '5511999990000', direction: 'INBOUND', messageType: 'text', messageBody: body.messageBody || '', suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, status: 'RECEBIDA_PENDENTE_TRIAGEM', preparedReply: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', createdAt: demoNowIso() }; db.whatsappMessages.push(msg); return save({ ok: true, message: msg, previewMode: true }); }
+  if (pathname === '/api/whatsapp/simulate-message' && method === 'POST') {
+    const sug = demoSuggestFromMessage(db, body.messageBody);
+    const payloadJson = { suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, simulated: true };
+    if (body.mediaId || body.mediaStoragePath) {
+      payloadJson.mediaId = body.mediaId || demoUuid('wamedia');
+      payloadJson.mediaMimeType = body.mediaMimeType || 'image/jpeg';
+      payloadJson.storedMedia = body.mediaStoragePath ? { uploaded: true, bucket: 'occurrence-attachments', path: body.mediaStoragePath, contentType: payloadJson.mediaMimeType, size: Number(body.mediaSizeBytes || 0) } : { uploaded: false, reason: 'Mídia simulada aguardando download.' };
+    }
+    const media = whatsappMessageMediaState({ payloadJson });
+    const msg = { id: demoUuid('wam'), cityId: db.cities[0].id, channelId: db.whatsappChannels[0].id, citizenPhone: body.citizenPhone || '5511999990000', direction: 'INBOUND', messageType: media.hasMedia ? 'image' : 'text', messageBody: body.messageBody || '', suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, status: 'RECEBIDA_PENDENTE_TRIAGEM', preparedReply: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payloadJson, mediaId: media.mediaId, mediaMimeType: media.contentType, mediaStoragePath: media.storagePath, hasMedia: media.hasMedia, createdAt: demoNowIso() };
+    db.whatsappMessages.push(msg);
+    return save({ ok: true, message: msg, previewMode: true });
+  }
   const waCreate = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/create-occurrence$/);
-  if (waCreate && method === 'POST') { const msg = db.whatsappMessages.find(m => m.id === waCreate[1]); if (!msg) throw new Error('Mensagem não encontrada.'); const cat = db.categories.find(c => c.id === msg.suggestedCategoryId) || db.categories[0]; const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: 'Ocorrência recebida pelo WhatsApp', description: msg.messageBody, categoryId: cat.id, subcategoryId: null, neighborhoodId: null, departmentId: cat.defaultDepartmentId, assignedAgentId: null, citizenId: null, priority: msg.suggestedPriority || 'MEDIA', status: 'RECEBIDO', address: '', referencePoint: 'Relato recebido pelo WhatsApp', publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(msg.suggestedPriority || 'MEDIA'), publicMessage: 'Ocorrência registrada a partir do canal oficial de WhatsApp.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() }; db.occurrences.push(occ); msg.status = 'CONVERTIDA_EM_OCORRENCIA'; msg.occurrenceId = occ.id; msg.preparedReply = `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`; db.statusHistory.push({ id: demoUuid('hist'), occurrenceId: occ.id, newStatus: 'RECEBIDO', publicMessage: occ.publicMessage, createdAt: demoNowIso() }); return save({ ok: true, occurrence: demoSerializeOccurrence(db, occ), message: msg, previewMode: true }); }
+  if (waCreate && method === 'POST') {
+    const msg = db.whatsappMessages.find(m => m.id === waCreate[1]);
+    if (!msg) throw new Error('Mensagem não encontrada.');
+    if (msg.occurrenceId) {
+      const existing = db.occurrences.find(o => o.id === msg.occurrenceId);
+      if (existing) {
+        const mediaAttachment = demoLinkWhatsAppMediaAttachment(db, msg, existing, currentUser?.id || null);
+        return save({ ok: true, occurrence: demoSerializeOccurrence(db, existing), message: msg, mediaAttachment, alreadyConverted: true, previewMode: true });
+      }
+    }
+    const cat = db.categories.find(c => c.id === msg.suggestedCategoryId) || db.categories[0];
+    const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: 'Ocorrência recebida pelo WhatsApp', description: msg.messageBody, categoryId: cat.id, subcategoryId: null, neighborhoodId: null, departmentId: cat.defaultDepartmentId, assignedAgentId: null, citizenId: null, priority: msg.suggestedPriority || 'MEDIA', status: 'RECEBIDO', address: '', referencePoint: 'Relato recebido pelo WhatsApp', publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(msg.suggestedPriority || 'MEDIA'), publicMessage: 'Ocorrência registrada a partir do canal oficial de WhatsApp.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() };
+    db.occurrences.push(occ);
+    msg.status = 'CONVERTIDA_EM_OCORRENCIA';
+    msg.occurrenceId = occ.id;
+    msg.preparedReply = `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`;
+    db.statusHistory.push({ id: demoUuid('hist'), occurrenceId: occ.id, newStatus: 'RECEBIDO', publicMessage: occ.publicMessage, createdAt: demoNowIso() });
+    const mediaAttachment = demoLinkWhatsAppMediaAttachment(db, msg, occ, currentUser?.id || null);
+    return save({ ok: true, occurrence: demoSerializeOccurrence(db, occ), message: msg, mediaAttachment, previewMode: true });
+  }
   const waStatus = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/status$/);
   if (waStatus && method === 'POST') { const msg = db.whatsappMessages.find(m => m.id === waStatus[1]); if (msg) { msg.status = body.status || msg.status; msg.preparedReply = msg.status === 'AGUARDANDO_INFORMACOES' ? 'Para registrar sua solicitação, informe o bairro, rua ou ponto de referência.' : msg.preparedReply; } return save({ ok: true, message: msg, preparedReply: msg?.preparedReply, previewMode: true }); }
   const waLink = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/link-occurrence$/);
-  if (waLink && method === 'POST') { const msg = db.whatsappMessages.find(m => m.id === waLink[1]); const occ = db.occurrences.find(o => o.protocol === body.protocol); if (!msg || !occ) throw new Error('Mensagem ou protocolo não encontrado.'); msg.status = 'VINCULADA_A_PROTOCOLO'; msg.occurrenceId = occ.id; return save({ ok: true, message: msg, occurrence: demoSerializeOccurrence(db, occ), previewMode: true }); }
+  if (waLink && method === 'POST') {
+    const msg = db.whatsappMessages.find(m => m.id === waLink[1]);
+    const occ = db.occurrences.find(o => o.protocol === body.protocol);
+    if (!msg || !occ) throw new Error('Mensagem ou protocolo não encontrado.');
+    msg.status = 'VINCULADA_A_PROTOCOLO';
+    msg.occurrenceId = occ.id;
+    const mediaAttachment = demoLinkWhatsAppMediaAttachment(db, msg, occ, currentUser?.id || null);
+    return save({ ok: true, message: msg, occurrence: demoSerializeOccurrence(db, occ), mediaAttachment, previewMode: true });
+  }
+  const waSendPrepared = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/send-prepared$/);
+  if (waSendPrepared && method === 'POST') {
+    const msg = db.whatsappMessages.find(m => m.id === waSendPrepared[1]);
+    if (!msg) throw new Error('Mensagem não encontrada.');
+    const outbound = { id: demoUuid('wam'), cityId: msg.cityId, channelId: msg.channelId, occurrenceId: msg.occurrenceId || null, citizenPhone: msg.citizenPhone, direction: 'FAILED', messageType: 'text', messageBody: body.messageBody || msg.preparedReply || '', status: 'ERRO', processingStatus: 'ERRO', errorMessage: 'Envio real indisponível no modo demonstrativo.', createdAt: demoNowIso() };
+    db.whatsappMessages.push(outbound);
+    return save({ ok: true, sent: false, fallback: true, error: outbound.errorMessage, outboundMessage: outbound, previewMode: true });
+  }
   throw new Error('Rota não disponível no modo demonstrativo online. Use localhost para a API completa.');
 }
 
@@ -974,11 +1073,21 @@ function panelWhatsAppTriage() {
   `;
 }
 
+function whatsappMediaStatusHtml(row = {}) {
+  const media = whatsappMessageMediaState(row);
+  if (!media.hasMedia) return '';
+  if (media.storagePath) return `<br><small><span class="badge success">Mídia salva</span> Evidência será vinculada ao criar ou vincular protocolo.</small>`;
+  if (media.error) return `<br><small><span class="badge danger">Mídia pendente</span> ${escapeHtml(media.error)}</small>`;
+  return `<br><small><span class="badge warning">Mídia pendente</span> Aguardando download para evidência.</small>`;
+}
+
 function whatsappTriageTable(rows = []) {
   if (!rows.length) return empty('Nenhuma mensagem recebida pelo WhatsApp ainda. Use a simulação local ou configure o webhook da Meta.');
   return `<div class="data-table-wrap"><table class="gov-table"><thead><tr><th>Status</th><th>Cidadão</th><th>Mensagem</th><th>Protocolo</th><th>Ações</th></tr></thead><tbody>${rows.map(row => {
     const linked = row.occurrence ? `${row.occurrence.protocol} · ${statusLabels[row.occurrence.status] || row.occurrence.status}` : 'Sem protocolo';
-    return `<tr><td>${badgeWhatsappStatus(row.status)}</td><td>${escapeHtml(row.citizenPhone || 'Não informado')}<br><small>${fmtDate(row.createdAt)}</small></td><td>${escapeHtml(row.messageBody || '')}<br><small>Sugestão: ${escapeHtml(priorityLabels[row.suggestedPriority] || row.suggestedPriority || 'triagem manual')}</small></td><td>${escapeHtml(linked)}</td><td><div class="quick-actions"><button class="gov-button small primary" data-wa-create-occurrence="${escapeHtml(row.id)}">Criar ocorrência</button><button class="gov-button small" data-wa-more-info="${escapeHtml(row.id)}">Solicitar dados</button><button class="gov-button small" data-wa-link-message="${escapeHtml(row.id)}">Vincular</button><button class="gov-button small ghost" data-wa-archive="${escapeHtml(row.id)}">Arquivar</button></div>${row.preparedReply ? `<details class="prepared-reply"><summary>Resposta preparada</summary><p>${escapeHtml(row.preparedReply)}</p><button class="gov-button small" data-copy-text="${escapeHtml(row.preparedReply)}">Copiar resposta</button><button class="gov-button small primary" data-wa-send-prepared="${escapeHtml(row.id)}">Enviar WhatsApp real</button></details>` : ''}</td></tr>`;
+    const canTriage = !row.occurrenceId && !row.occurrence && !['CONVERTIDA_EM_OCORRENCIA','VINCULADA_A_PROTOCOLO'].includes(row.status);
+    const triageActions = canTriage ? `<button class="gov-button small primary" data-wa-create-occurrence="${escapeHtml(row.id)}">Criar ocorrência</button><button class="gov-button small" data-wa-more-info="${escapeHtml(row.id)}">Solicitar dados</button><button class="gov-button small" data-wa-link-message="${escapeHtml(row.id)}">Vincular</button>` : '';
+    return `<tr><td>${badgeWhatsappStatus(row.status)}</td><td>${escapeHtml(row.citizenPhone || 'Não informado')}<br><small>${fmtDate(row.createdAt)}</small></td><td>${escapeHtml(row.messageBody || '')}${whatsappMediaStatusHtml(row)}<br><small>Sugestão: ${escapeHtml(priorityLabels[row.suggestedPriority] || row.suggestedPriority || 'triagem manual')}</small></td><td>${escapeHtml(linked)}</td><td><div class="quick-actions">${triageActions}<button class="gov-button small ghost" data-wa-archive="${escapeHtml(row.id)}">Arquivar</button></div>${row.preparedReply ? `<details class="prepared-reply"><summary>Resposta preparada</summary><p>${escapeHtml(row.preparedReply)}</p><button class="gov-button small" data-copy-text="${escapeHtml(row.preparedReply)}">Copiar resposta</button><button class="gov-button small primary" data-wa-send-prepared="${escapeHtml(row.id)}">Enviar WhatsApp real</button></details>` : ''}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 

@@ -122,7 +122,7 @@ Estrutura para zona rural, estradas, pontes, acessos, comunidades afastadas e im
 
 ## Status do desenvolvimento
 
-A versão atual está na **Fase 2.3**, em que o projeto já saiu do conceito visual isolado e entrou em um cenário de preview online com dados compartilhados.
+A versão atual está na **Fase 2.8**, com evidências operacionais, WhatsApp Cloud API, mídia recebida pelo webhook e vínculo automático de anexos a protocolos.
 
 ### <img src="./docs/assets/svg/cidadeos-bullet-dot.svg" width="14" alt="" /> Já consolidado
 
@@ -140,14 +140,14 @@ transparência pública
 api serverless para vercel
 supabase compartilhado
 whatsapp business configurável
+mídias do whatsapp vinculadas como evidências
 documentação técnica e identidade visual
 ```
 
 ### <img src="./docs/assets/svg/cidadeos-bullet-dot.svg" width="14" alt="" /> Em evolução
 
 ```txt
-upload real de anexos
-envio real pela cloud api do whatsapp
+envio real pela cloud api do whatsapp em operações conectadas
 criptografia reforçada por cidade
 autenticação robusta de produção
 mapa e geolocalização
@@ -171,7 +171,7 @@ A próxima janela mais provável concentra:
 - reforço de autenticação
 - preparação para operação multi-cidade
 
-A estimativa visual acima resume a leitura atual: **aproximadamente 72% do núcleo do produto está consolidado**, com uma **janela de 15 a 30 dias** para uma nova rodada forte de avanço, considerando ritmo contínuo de desenvolvimento.
+A estimativa visual acima resume a leitura atual: **aproximadamente 78% do núcleo do produto está consolidado**, com uma **janela de 15 a 30 dias** para uma nova rodada forte de avanço, considerando ritmo contínuo de desenvolvimento.
 
 <div align="center">
   <img src="./docs/assets/svg/cidadeos-divider.svg" alt="Divisória" width="100%" />

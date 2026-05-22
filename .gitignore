@@ -1,17 +1,17 @@
 # Dependencies
 node_modules/
 
-# Environment
+# Environment and secrets
 .env
 .env.*
 !.env.example
+.vercel
+.vercel/
 
-# Runtime data generated locally
+# Local runtime data
 /data/cidadeos.json
 /data/attachments/*
 !/data/attachments/.gitkeep
-
-# Logs
 logs/
 *.log
 npm-debug.log*
@@ -19,11 +19,30 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Build outputs
+# Build outputs and coverage
 dist/
 build/
 .out/
 coverage/
+
+# Temporary files and archives
+.tmp/
+tmp/
+.cache/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Local delivery notes outside docs
+RELATORIO_*.md
+RELATORIO_*.txt
+CIDADEOS_DATABASE_PENDENTE_*.md
+VERSAO_ATUAL.txt
+!docs/RELATORIO_*.md
+!docs/RELATORIO_*.txt
+!docs/CIDADEOS_DATABASE_PENDENTE_*.md
 
 # OS / editor
 .DS_Store
@@ -31,10 +50,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Temporary
-.tmp/
-tmp/
-.cache/
+# Local helper scripts
 abrir-localhost.bat
 atualizar-e-iniciar.bat
 subir-github-cidadeos-final.bat
+subir-github-cidadeos*.bat

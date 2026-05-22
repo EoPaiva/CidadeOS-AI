@@ -1,13 +1,13 @@
 {
-  "name": "cidadeos-ai-fase2-5-evidencias-anexos-auditoria",
-  "version": "2.5.0",
-  "description": "CidadeOS AI — Fase 2.5 com gestão de evidências, galeria de anexos e auditoria operacional.",
+  "name": "cidadeos-ai-fase2-8-whatsapp-midia-evidencias",
+  "version": "2.8.0",
+  "description": "CidadeOS AI - Fase 2.8 com vinculo automatico de midia do WhatsApp como evidencia operacional.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
-    "check": "node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/utils.js && node --check public/app.js",
+    "check": "node --check api/[...path].js && node --check server/index.js && node --check server/db.js && node --check server/auth.js && node --check server/utils.js && node --check public/app.js",
     "validate": "npm run check",
     "build": "node scripts/build-static.js",
     "deploy:preview": "vercel",
