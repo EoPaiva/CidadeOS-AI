@@ -9,6 +9,8 @@ const MAX_ATTACHMENT_BYTES = Number(process.env.CIDADEOS_MAX_ATTACHMENT_BYTES ||
 const WHATSAPP_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || 'v20.0';
 const WHATSAPP_MEDIA_BUCKET = process.env.WHATSAPP_MEDIA_BUCKET || 'occurrence-attachments';
 const WHATSAPP_VALIDATE_SIGNATURE = String(process.env.WHATSAPP_VALIDATE_SIGNATURE || 'false').toLowerCase() === 'true';
+const ASSISTIVE_AI_MODEL = process.env.CIDADEOS_AI_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const ASSISTIVE_AI_TIMEOUT_MS = Number(process.env.CIDADEOS_AI_TIMEOUT_MS || 8000);
 
 const statusToDb = {
   RECEBIDO: 'recebido', EM_ANALISE: 'em_analise', ENCAMINHADO: 'encaminhado', EM_EXECUCAO: 'em_execucao', AGUARDANDO_TERCEIRO: 'aguardando_terceiro', AGUARDANDO_CIDADAO: 'aguardando_cidadao', RESOLVIDO: 'resolvido', CANCELADO: 'cancelado', DUPLICADO: 'duplicado', ARQUIVADO: 'arquivado'
@@ -308,6 +310,304 @@ function buildLocalTriageSuggestion({ text = '', categories = [], departments = 
     reason: matchedKeywords.length ? `Regra local por palavra-chave: ${matchedKeywords.join(', ')}.` : 'Sem palavra-chave forte; sugestão inicial conservadora.'
   };
 }
+function trimAssistiveText(value = '', max = 360) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
+}
+
+function redactPersonalData(value = '') {
+  return String(value || '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email oculto]')
+    .replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[documento oculto]')
+    .replace(/(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?(?:9\s*)?\d{4}[-\s]?\d{4}/g, '[telefone oculto]');
+}
+
+function assistiveTokens(value = '') {
+  const stopwords = new Set(['para','com','sem','uma','um','que','por','das','dos','nas','nos','aqui','ali','esta','este','isso','muito','pelo','pela','de','da','do','em','no','na']);
+  return normalizeRuleText(value).split(' ').filter((token) => token.length > 2 && !stopwords.has(token));
+}
+
+function scoreTextSimilarity(left = '', right = '') {
+  const leftTokens = new Set(assistiveTokens(left));
+  const rightTokens = new Set(assistiveTokens(right));
+  if (!leftTokens.size || !rightTokens.size) return 0;
+  let overlap = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) overlap += 1;
+  return overlap / Math.max(leftTokens.size, rightTokens.size);
+}
+
+function findAssistiveNeighborhood(neighborhoods = [], { cityId = '', neighborhoodId = '', text = '' } = {}) {
+  const scoped = neighborhoods.filter((item) => (!cityId || !item.cityId || item.cityId === cityId) && item.active !== false);
+  const direct = scoped.find((item) => item.id === neighborhoodId);
+  if (direct) return direct;
+  const normalized = normalizeRuleText(text);
+  return scoped.find((item) => normalizeRuleText(item.name).length > 2 && normalized.includes(normalizeRuleText(item.name))) || null;
+}
+
+function buildAssistiveSummary(text = '') {
+  const safe = redactPersonalData(text);
+  const firstSentence = safe.split(/(?<=[.!?])\s+/).find((part) => part.trim().length >= 24) || safe;
+  return trimAssistiveText(firstSentence || 'Relato sem descricao suficiente para resumo automatico.', 320);
+}
+
+function buildRiskProfile(priority = 'MEDIA', text = '') {
+  const normalized = normalizeRuleText(text);
+  const factors = [];
+  if (priority === 'CRITICA') factors.push('prioridade critica sugerida');
+  if (priority === 'ALTA') factors.push('prioridade alta sugerida');
+  if (/(risco imediato|desabamento|deslizamento|alagamento|enchente|fio exposto|poste caindo|ponte caiu|queda de arvore)/.test(normalized)) factors.push('termo de risco imediato no relato');
+  if (/(idoso|idosa|crianca|vulneravel|morador de rua)/.test(normalized)) factors.push('pessoa vulneravel mencionada');
+  if (/(esgoto|dengue|agua parada|foco|contaminacao)/.test(normalized)) factors.push('risco sanitario mencionado');
+  let riskLevel = priority === 'CRITICA' ? 'CRITICO' : priority === 'ALTA' ? 'ALTO' : priority === 'MEDIA' ? 'MEDIO' : 'BAIXO';
+  if (riskLevel === 'MEDIO' && factors.length >= 2) riskLevel = 'ALTO';
+  if (riskLevel === 'BAIXO' && factors.length) riskLevel = 'MEDIO';
+  return { riskLevel, riskFactors: factors.length ? factors : ['sem fator critico explicito no relato'] };
+}
+
+function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '' } = {}) {
+  const activeStatuses = new Set(['RECEBIDO','EM_ANALISE','ENCAMINHADO','EM_EXECUCAO','AGUARDANDO_TERCEIRO']);
+  const normalizedAddress = normalizeRuleText([address, referencePoint].filter(Boolean).join(' '));
+  return occurrences
+    .filter((item) => item && item.id !== occurrenceId && item.protocol !== occurrenceId && (!cityId || item.cityId === cityId))
+    .map((item) => {
+      const candidateText = [item.title, item.description, item.address, item.referencePoint].filter(Boolean).join(' ');
+      let score = scoreTextSimilarity(text, candidateText) * 0.5;
+      if (categoryId && item.categoryId === categoryId) score += 0.18;
+      if (neighborhoodId && item.neighborhoodId === neighborhoodId) score += 0.18;
+      const candidateAddress = normalizeRuleText([item.address, item.referencePoint].filter(Boolean).join(' '));
+      if (normalizedAddress && candidateAddress && (candidateAddress.includes(normalizedAddress) || normalizedAddress.includes(candidateAddress))) score += 0.24;
+      if (activeStatuses.has(item.status)) score += 0.05;
+      return {
+        id: item.id,
+        protocol: item.protocol,
+        title: trimAssistiveText(item.title || item.description || 'Ocorrencia similar', 90),
+        status: item.status,
+        score: Number(Math.min(score, 0.99).toFixed(2)),
+        reason: neighborhoodId && item.neighborhoodId === neighborhoodId ? 'Mesmo bairro e relato semelhante.' : 'Relato semelhante encontrado.'
+      };
+    })
+    .filter((item) => item.score >= 0.42)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+}
+
+function buildAssistiveTriageFallback(input = {}) {
+  const cityId = input.cityId || '';
+  const text = [input.text, input.title, input.description, input.address, input.referencePoint, input.messageBody].filter(Boolean).join(' ');
+  const local = input.localSuggestion || buildLocalTriageSuggestion({ text, categories: input.categories, departments: input.departments, subcategories: input.subcategories, cityId });
+  const neighborhood = findAssistiveNeighborhood(input.neighborhoods, { cityId, neighborhoodId: input.neighborhoodId, text });
+  const probableAddress = trimAssistiveText([input.address, input.referencePoint].filter(Boolean).join(' - '), 180);
+  const missingFields = [];
+  if (!neighborhood) missingFields.push('bairro');
+  if (!probableAddress) missingFields.push('localizacao');
+  const needsComplement = missingFields.length > 0;
+  const complementRequest = missingFields.includes('bairro')
+    ? 'Para continuar, informe o bairro e, se possivel, rua ou ponto de referencia da ocorrencia.'
+    : 'Para continuar, informe rua, numero aproximado ou ponto de referencia da ocorrencia.';
+  const risk = buildRiskProfile(local.priority, text);
+  const duplicateCandidates = findDuplicateCandidates(input.occurrences, {
+    cityId,
+    occurrenceId: input.occurrenceId || input.id || input.protocol || '',
+    text,
+    categoryId: local.categoryId,
+    neighborhoodId: neighborhood?.id || input.neighborhoodId || '',
+    address: input.address,
+    referencePoint: input.referencePoint
+  });
+  const duplicateRisk = duplicateCandidates[0]?.score >= 0.72 ? 'ALTO' : duplicateCandidates[0]?.score >= 0.52 ? 'MEDIO' : 'BAIXO';
+  const summary = buildAssistiveSummary(text);
+  const citizenResponse = needsComplement ? complementRequest : local.publicMessage;
+  return {
+    ...local,
+    aiAvailable: false,
+    aiAttempted: false,
+    summary,
+    publicSummary: summary,
+    probableCategoryId: local.categoryId,
+    probableCategoryName: local.categoryName,
+    probableNeighborhoodId: neighborhood?.id || null,
+    probableNeighborhoodName: neighborhood?.name || '',
+    probableAddress,
+    missingFields,
+    needsComplement,
+    complementRequest,
+    riskLevel: risk.riskLevel,
+    riskFactors: risk.riskFactors,
+    duplicateCandidates,
+    duplicateRisk,
+    citizenResponse,
+    publicMessage: citizenResponse || local.publicMessage,
+    reason: `${local.reason} ${needsComplement ? 'Complemento necessario antes da conclusao da triagem.' : 'Dados minimos presentes para triagem assistida.'}`
+  };
+}
+
+function getAssistiveAiKey() {
+  return String(process.env.CIDADEOS_OPENAI_API_KEY || process.env.OPENAI_API_KEY || '').trim();
+}
+
+function parseAssistiveAiJson(content = '') {
+  try { return JSON.parse(content); } catch {}
+  const match = String(content || '').match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try { return JSON.parse(match[0]); } catch { return null; }
+}
+
+async function callAssistiveAi(payload) {
+  const key = getAssistiveAiKey();
+  if (!key) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ASSISTIVE_AI_TIMEOUT_MS);
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ASSISTIVE_AI_MODEL,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: 'Voce apoia triagem municipal. Responda apenas JSON. A IA e assistiva, nao decide. Nao invente bairro, endereco ou dado ausente. Se faltar bairro/localizacao, marque complemento. Nao inclua dados pessoais no resumo publico.'
+          },
+          { role: 'user', content: JSON.stringify(payload) }
+        ]
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error?.message || `OpenAI HTTP ${response.status}`);
+    return parseAssistiveAiJson(data?.choices?.[0]?.message?.content || '');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function findAssistiveChoice(items = [], value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = normalizeRuleText(raw);
+  return items.find((item) => item.id === raw || normalizeRuleText(item.name || item.key || '').includes(normalized) || normalized.includes(normalizeRuleText(item.name || item.key || ''))) || null;
+}
+
+function normalizeAssistivePriority(value = '') {
+  const normalized = normalizeRuleText(value);
+  if (normalized === 'critica' || normalized === 'critico') return 'CRITICA';
+  if (normalized === 'alta' || normalized === 'alto') return 'ALTA';
+  if (normalized === 'media' || normalized === 'medio') return 'MEDIA';
+  if (normalized === 'baixa' || normalized === 'baixo') return 'BAIXA';
+  return '';
+}
+
+function normalizeAssistiveRisk(value = '') {
+  const normalized = normalizeRuleText(value);
+  if (normalized === 'critico' || normalized === 'critica') return 'CRITICO';
+  if (normalized === 'alto' || normalized === 'alta') return 'ALTO';
+  if (normalized === 'medio' || normalized === 'media') return 'MEDIO';
+  if (normalized === 'baixo' || normalized === 'baixa') return 'BAIXO';
+  return '';
+}
+
+function normalizeMissingFields(fields = []) {
+  return [...new Set((Array.isArray(fields) ? fields : [fields]).map((field) => {
+    const normalized = normalizeRuleText(field);
+    if (normalized.includes('bairro')) return 'bairro';
+    if (normalized.includes('local') || normalized.includes('endereco') || normalized.includes('rua') || normalized.includes('referencia')) return 'localizacao';
+    return '';
+  }).filter(Boolean))];
+}
+
+function mergeAssistiveAiSuggestion(aiSuggestion, fallback, input = {}) {
+  if (!aiSuggestion || typeof aiSuggestion !== 'object') return fallback;
+  const category = findAssistiveChoice(input.categories, aiSuggestion.categoryId || aiSuggestion.categoryName || aiSuggestion.categoria) || input.categories.find((item) => item.id === fallback.categoryId) || null;
+  const department = findAssistiveChoice(input.departments, aiSuggestion.departmentId || aiSuggestion.departmentName || aiSuggestion.setor) || input.departments.find((item) => item.id === fallback.departmentId) || null;
+  const subcategory = findAssistiveChoice((input.subcategories || []).filter((item) => !category || item.categoryId === category.id), aiSuggestion.subcategoryId || aiSuggestion.subcategoryName || aiSuggestion.subcategoria) || input.subcategories.find((item) => item.id === fallback.subcategoryId) || null;
+  const priority = normalizeAssistivePriority(aiSuggestion.priority || aiSuggestion.prioridade) || fallback.priority;
+  const riskLevel = normalizeAssistiveRisk(aiSuggestion.riskLevel || aiSuggestion.risco) || fallback.riskLevel;
+  const missingFields = [...new Set([...fallback.missingFields, ...normalizeMissingFields(aiSuggestion.missingFields || aiSuggestion.camposAusentes)])];
+  const needsComplement = fallback.needsComplement || missingFields.length > 0 || Boolean(aiSuggestion.needsComplement);
+  const safeSummary = trimAssistiveText(redactPersonalData(aiSuggestion.summary || aiSuggestion.resumo || fallback.summary), 360);
+  const safePublicSummary = trimAssistiveText(redactPersonalData(aiSuggestion.publicSummary || aiSuggestion.resumoPublico || safeSummary), 360);
+  const safeCitizenResponse = trimAssistiveText(redactPersonalData(aiSuggestion.citizenResponse || aiSuggestion.respostaCidadao || ''), 420);
+  const confidence = Number(aiSuggestion.confidence || aiSuggestion.confianca || fallback.confidence);
+  return {
+    ...fallback,
+    source: 'openai_assistive_v1',
+    aiAvailable: true,
+    aiAttempted: true,
+    aiModel: ASSISTIVE_AI_MODEL,
+    categoryId: category?.id || fallback.categoryId,
+    categoryName: category?.name || fallback.categoryName,
+    subcategoryId: subcategory?.id || fallback.subcategoryId,
+    subcategoryName: subcategory?.name || fallback.subcategoryName,
+    departmentId: department?.id || fallback.departmentId,
+    departmentName: department?.name || fallback.departmentName,
+    priority,
+    probableCategoryId: category?.id || fallback.categoryId,
+    probableCategoryName: category?.name || fallback.categoryName,
+    summary: safeSummary || fallback.summary,
+    publicSummary: safePublicSummary || fallback.publicSummary,
+    probableAddress: fallback.probableAddress,
+    missingFields,
+    needsComplement,
+    riskLevel,
+    riskFactors: Array.isArray(aiSuggestion.riskFactors) && aiSuggestion.riskFactors.length ? aiSuggestion.riskFactors.map((item) => trimAssistiveText(item, 120)) : fallback.riskFactors,
+    citizenResponse: needsComplement ? fallback.complementRequest : (safeCitizenResponse || fallback.citizenResponse),
+    publicMessage: needsComplement ? fallback.complementRequest : (safeCitizenResponse || fallback.publicMessage),
+    confidence: Number.isFinite(confidence) ? Math.max(0.35, Math.min(0.98, confidence)) : fallback.confidence,
+    confidenceLabel: Number.isFinite(confidence) && confidence >= 0.75 ? 'Alta' : Number.isFinite(confidence) && confidence >= 0.5 ? 'Media' : fallback.confidenceLabel,
+    reason: trimAssistiveText(`${aiSuggestion.reason || aiSuggestion.justificativa || fallback.reason} Resultado validado contra cadastros locais; aplicacao depende de confirmacao humana.`, 420)
+  };
+}
+
+async function buildAssistiveTriageSuggestion(input = {}) {
+  const fallback = buildAssistiveTriageFallback(input);
+  if (!getAssistiveAiKey()) return fallback;
+  const payload = {
+    relato: {
+      titulo: redactPersonalData(input.title || ''),
+      descricao: redactPersonalData(input.description || input.text || input.messageBody || ''),
+      enderecoInformado: redactPersonalData([input.address, input.referencePoint].filter(Boolean).join(' - ')),
+      bairroJaSelecionado: fallback.probableNeighborhoodName || ''
+    },
+    regraLocal: {
+      categoria: fallback.categoryName,
+      prioridade: fallback.priority,
+      setor: fallback.departmentName,
+      camposAusentes: fallback.missingFields,
+      risco: fallback.riskLevel
+    },
+    opcoesValidas: {
+      categorias: (input.categories || []).filter((item) => item.active !== false).map((item) => ({ id: item.id, nome: item.name })),
+      subcategorias: (input.subcategories || []).filter((item) => item.active !== false).map((item) => ({ id: item.id, categoriaId: item.categoryId, nome: item.name })),
+      setores: (input.departments || []).filter((item) => (!input.cityId || item.cityId === input.cityId) && item.active !== false).map((item) => ({ id: item.id, nome: item.name })),
+      bairros: (input.neighborhoods || []).filter((item) => (!input.cityId || item.cityId === input.cityId) && item.active !== false).map((item) => ({ id: item.id, nome: item.name }))
+    },
+    candidatosDuplicidade: fallback.duplicateCandidates
+  };
+  try {
+    const aiSuggestion = await callAssistiveAi(payload);
+    return mergeAssistiveAiSuggestion(aiSuggestion, fallback, input);
+  } catch (error) {
+    return {
+      ...fallback,
+      aiAvailable: true,
+      aiAttempted: true,
+      aiError: trimAssistiveText(error.message || 'Falha na IA opcional.', 180),
+      reason: `${fallback.reason} IA opcional indisponivel; fallback local usado.`
+    };
+  }
+}
+
+function triageSuggestionApplicationComment(suggestion = {}) {
+  const parts = ['Sugestao assistida de triagem aplicada apos confirmacao.'];
+  if (suggestion.summary) parts.push(`Resumo: ${trimAssistiveText(suggestion.summary, 180)}`);
+  if (suggestion.riskLevel) parts.push(`Risco: ${suggestion.riskLevel}`);
+  if ((suggestion.duplicateCandidates || []).length) parts.push(`Possivel duplicidade: ${suggestion.duplicateCandidates.map((item) => item.protocol).filter(Boolean).join(', ')}`);
+  if (suggestion.needsComplement) parts.push('Complemento solicitado ao cidadao.');
+  return parts.join(' ');
+}
+
 async function occurrenceLookups(cityId, occurrenceIds = []) {
   const [neighborhoods, departments, categories, subcategories, users, history, comments, attachmentRows, cities] = await Promise.all([
     supa(`neighborhoods?city_id=eq.${cityId}&select=*`).then(r => r.map(neighborhoodFromDb)),
@@ -709,10 +1009,12 @@ export default async function handler(req, res) {
         body: JSON.stringify([{ city_id: hookCityId, channel_id: channel?.id || null, event_type: 'whatsapp_webhook', payload_json: body, processed: false }])
       });
       const parsed = extractWhatsAppWebhookMessages(body);
-      const [categories, departments, subcategories] = await Promise.all([
+      const [categories, departments, subcategories, neighborhoods, occurrenceRows] = await Promise.all([
         supa('occurrence_categories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(categoryFromDb)),
         supa(`departments?city_id=eq.${hookCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(departmentFromDb)),
-        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb))
+        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${hookCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(neighborhoodFromDb)),
+        supa(`occurrences?city_id=eq.${hookCityId}&select=*&order=created_at.desc&limit=60`).then(r => r.map(occurrenceBaseFromDb))
       ]);
       const inserted = [];
       for (const item of parsed) {
@@ -725,7 +1027,7 @@ export default async function handler(req, res) {
             continue;
           }
           const conversation = await upsertWhatsAppConversation({ cityId: hookCityId, channelId: channel?.id || null, phone: item.from });
-          const suggestion = buildLocalTriageSuggestion({ text: item.body, categories, departments, subcategories, cityId: hookCityId });
+          const suggestion = buildAssistiveTriageFallback({ text: item.body, messageBody: item.body, categories, departments, subcategories, neighborhoods, occurrences: occurrenceRows, cityId: hookCityId });
           const rows = await supa('whatsapp_messages', {
             method: 'POST',
             body: JSON.stringify([{
@@ -955,13 +1257,16 @@ export default async function handler(req, res) {
 
     if (pathname === '/api/triage/suggest' && req.method === 'POST') {
       const targetCityId = user.cityId || cityId;
-      const [categories, departments, subcategories] = await Promise.all([
+      const [categories, departments, subcategories, neighborhoods, occurrenceRows] = await Promise.all([
         supa('occurrence_categories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(categoryFromDb)),
         supa(`departments?city_id=eq.${targetCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(departmentFromDb)),
-        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb))
+        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${targetCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(neighborhoodFromDb)),
+        supa(`occurrences?city_id=eq.${targetCityId}&select=*&order=created_at.desc&limit=60`).then(r => r.map(occurrenceBaseFromDb))
       ]);
       const text = [body.text, body.title, body.description, body.address, body.referencePoint, body.messageBody].filter(Boolean).join(' ');
-      return ok(res, { suggestion: buildLocalTriageSuggestion({ text, categories, departments, subcategories, cityId: targetCityId }) });
+      const suggestion = await buildAssistiveTriageSuggestion({ ...body, text, categories, departments, subcategories, neighborhoods, occurrences: occurrenceRows, cityId: targetCityId });
+      return ok(res, { suggestion });
     }
 
     if (pathname === '/api/dashboard/city' && req.method === 'GET') {
@@ -1032,7 +1337,7 @@ export default async function handler(req, res) {
       const subcategoryId = pickSuggested('subcategoryId');
       const departmentId = pickSuggested('departmentId');
       const priority = String(pickSuggested('priority') || '').toUpperCase();
-      const publicMessage = String(pickSuggested('publicMessage') || '').trim();
+      const publicMessage = String(pickSuggested('publicMessage') || pickSuggested('citizenResponse') || '').trim();
       if (categoryId) {
         const category = (await supa(`occurrence_categories?id=eq.${encodeURIComponent(categoryId)}&active=eq.true&select=*&limit=1`))[0];
         if (category) updates.category_id = category.id;
@@ -1051,8 +1356,8 @@ export default async function handler(req, res) {
       }
       if (publicMessage) updates.public_message = publicMessage;
       const rows = await supa(`occurrences?id=eq.${old.id}`, { method: 'PATCH', body: JSON.stringify(updates) });
-      await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{ occurrence_id: old.id, city_id: old.city_id, changed_by: user.id, old_status: old.status, new_status: old.status, public_message: updates.public_message || old.public_message || null, visibility: 'publica' }]) });
-      await audit(old.city_id, user.id, 'LOCAL_TRIAGE_SUGGESTION_APPLIED', 'Occurrence', old.id, { before: { categoryId: old.category_id, subcategoryId: old.subcategory_id, departmentId: old.department_id, priority: old.priority }, updates, confidence: suggestion.confidence, source: suggestion.source });
+      await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{ occurrence_id: old.id, city_id: old.city_id, changed_by: user.id, old_status: old.status, new_status: old.status, comment: triageSuggestionApplicationComment(suggestion), public_message: updates.public_message || old.public_message || null, visibility: 'publica' }]) });
+      await audit(old.city_id, user.id, 'ASSISTIVE_TRIAGE_SUGGESTION_APPLIED', 'Occurrence', old.id, { before: { categoryId: old.category_id, subcategoryId: old.subcategory_id, departmentId: old.department_id, priority: old.priority }, updates, confidence: suggestion.confidence, source: suggestion.source, riskLevel: suggestion.riskLevel, duplicateRisk: suggestion.duplicateRisk, missingFields: suggestion.missingFields || [] });
       const [occ] = rows.length ? await serializeRows(rows, old.city_id) : [null];
       return ok(res, { occurrence: occ });
     }
@@ -1267,12 +1572,16 @@ export default async function handler(req, res) {
     }
     if (pathname === '/api/whatsapp/simulate-message' && req.method === 'POST') {
       const targetCityId = user.cityId || cityId;
-      const [cats, deps, subs] = await Promise.all([
+      const [cats, deps, subs, neighborhoods, occurrenceRows] = await Promise.all([
         supa('occurrence_categories?active=eq.true&select=*').then(r => r.map(categoryFromDb)),
         supa(`departments?city_id=eq.${targetCityId}&active=eq.true&select=*`).then(r => r.map(departmentFromDb)),
-        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb))
+        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${targetCityId}&active=eq.true&select=*`).then(r => r.map(neighborhoodFromDb)),
+        supa(`occurrences?city_id=eq.${targetCityId}&select=*&order=created_at.desc&limit=60`).then(r => r.map(occurrenceBaseFromDb))
       ]);
-      const [cat, pri, suggestion] = inferCategory(cats, body.messageBody, deps, subs, targetCityId);
+      const suggestion = buildAssistiveTriageFallback({ text: body.messageBody, messageBody: body.messageBody, categories: cats, departments: deps, subcategories: subs, neighborhoods, occurrences: occurrenceRows, cityId: targetCityId });
+      const cat = cats.find(c => c.id === suggestion.categoryId) || cats[0];
+      const pri = suggestion.priority;
       const channel = (await supa(`whatsapp_channels?city_id=eq.${targetCityId}&select=*&limit=1`))[0];
       const rows = await supa('whatsapp_messages', { method: 'POST', body: JSON.stringify([{ city_id: targetCityId, channel_id: channel?.id || null, citizen_phone: body.citizenPhone || '5511999990000', direction: 'received', processing_status: 'pendente_triagem', message_type: 'text', message_body: body.messageBody || '', prepared_response: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payload_json: { suggestedCategoryId: cat?.id, suggestedPriority: pri, localTriageSuggestion: suggestion, simulated: true } }]) });
       return ok(res, { message: messageFromDb(rows[0]) });
@@ -1289,12 +1598,16 @@ export default async function handler(req, res) {
           return ok(res, { occurrence: serialized, message: messageFromDb(msg, serialized), mediaAttachment, alreadyConverted: true });
         }
       }
-      const [cats, deps, subs] = await Promise.all([
+      const [cats, deps, subs, neighborhoods, occurrenceRows] = await Promise.all([
         supa('occurrence_categories?active=eq.true&select=*').then(r => r.map(categoryFromDb)),
         supa(`departments?city_id=eq.${msg.city_id}&active=eq.true&select=*`).then(r => r.map(departmentFromDb)),
-        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb))
+        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${msg.city_id}&active=eq.true&select=*`).then(r => r.map(neighborhoodFromDb)),
+        supa(`occurrences?city_id=eq.${msg.city_id}&select=*&order=created_at.desc&limit=60`).then(r => r.map(occurrenceBaseFromDb))
       ]);
-      const [cat, pri, suggestion] = inferCategory(cats, msg.message_body, deps, subs, msg.city_id);
+      const suggestion = msg.payload_json?.localTriageSuggestion || buildAssistiveTriageFallback({ text: msg.message_body, messageBody: msg.message_body, categories: cats, departments: deps, subcategories: subs, neighborhoods, occurrences: occurrenceRows, cityId: msg.city_id });
+      const cat = cats.find(c => c.id === suggestion.categoryId) || cats[0];
+      const pri = suggestion.priority;
       const categoryRow = await supa(`occurrence_categories?id=eq.${cat.id}&select=*`).then(r => r[0]);
       const occRows = await supa('occurrences', { method: 'POST', body: JSON.stringify([{ city_id: msg.city_id, title: 'Ocorrência recebida pelo WhatsApp', description: msg.message_body || '', category_id: cat.id, subcategory_id: suggestion.subcategoryId || null, department_id: suggestion.departmentId || categoryRow?.default_department_id || null, priority: dbPriority(pri), status: 'recebido', origin: 'whatsapp', source_channel: 'whatsapp', citizen_phone: msg.citizen_phone, reference_point: 'Relato recebido pelo WhatsApp', public_visibility: true, sla_due_at: computeSla(pri), public_message: suggestion.publicMessage || 'Ocorrência registrada a partir do canal oficial de WhatsApp.' }]) });
       const occ = occRows[0];

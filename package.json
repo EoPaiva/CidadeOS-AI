@@ -1,7 +1,7 @@
 {
-  "name": "cidadeos-ai-fase2-9-triagem-regras-locais",
-  "version": "2.9.0",
-  "description": "CidadeOS AI - Fase 2.9 com triagem inteligente por regras locais e confirmacao do agente.",
+  "name": "cidadeos-ai-fase3-0-ia-assistida-triagem",
+  "version": "3.0.0",
+  "description": "CidadeOS AI - Fase 3.0 com IA assistida opcional para classificacao, resumo e triagem com fallback local.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {

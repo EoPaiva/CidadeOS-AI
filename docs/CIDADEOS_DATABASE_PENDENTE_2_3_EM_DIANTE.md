@@ -78,3 +78,20 @@ A Fase 2.9 calcula sugestões de triagem sob demanda no backend/local/demo usand
 - `payload_json` de `whatsapp_messages` para guardar a sugestão calculada junto da mensagem
 
 Nenhuma sugestão substitui automaticamente a decisão do agente. O sistema só aplica categoria, setor, prioridade, mensagem pública e SLA depois de confirmação explícita na interface.
+
+## Fase 3.0 - IA assistida para classificacao e resumo
+
+Sem SQL obrigatorio novo.
+
+A Fase 3.0 mantem a IA como camada assistiva e opcional no backend. Quando uma chave de IA existir no ambiente seguro do servidor, a sugestao pode incluir:
+
+- resumo operacional sem dados pessoais;
+- categoria, prioridade, setor e risco provaveis;
+- bairro/endereco provavel somente quando houver dado informado ou correspondencia com cadastro local;
+- campos ausentes para pedir complemento ao cidadao;
+- candidatos de possivel duplicidade calculados com dados ja existentes;
+- resposta sugerida ao cidadao.
+
+Se nao houver chave de IA, timeout ou falha externa, o sistema usa o fallback por regras locais da Fase 2.9 e continua funcionando. Nenhuma sugestao e aplicada sem confirmacao explicita do agente.
+
+Os dados de aplicacao continuam usando campos ja existentes de `occurrences`, `occurrence_status_history`, `audit_logs` e `payload_json` de `whatsapp_messages`.
