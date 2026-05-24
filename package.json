@@ -1,7 +1,7 @@
 {
-  "name": "cidadeos-ai-fase2-8-whatsapp-midia-evidencias",
-  "version": "2.8.0",
-  "description": "CidadeOS AI - Fase 2.8 com vinculo automatico de midia do WhatsApp como evidencia operacional.",
+  "name": "cidadeos-ai-fase2-9-triagem-regras-locais",
+  "version": "2.9.0",
+  "description": "CidadeOS AI - Fase 2.9 com triagem inteligente por regras locais e confirmacao do agente.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {

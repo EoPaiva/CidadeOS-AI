@@ -64,3 +64,17 @@ A Fase 2.8 reutiliza:
 - bucket `occurrence-attachments`, ou `WHATSAPP_MEDIA_BUCKET` quando configurado.
 
 O backend foi preparado com fallback: se `source`/`metadata` ainda não existirem em `occurrence_attachments`, o vínculo do anexo tenta gravar os campos básicos sem bloquear a conversão da mensagem em protocolo. Não aplicar nada agora; manter acumulado até o pedido explícito do SQL completo.
+
+## Fase 2.9 — Triagem inteligente por regras locais
+
+Sem SQL obrigatório novo.
+
+A Fase 2.9 calcula sugestões de triagem sob demanda no backend/local/demo usando palavras-chave e estruturas já existentes:
+
+- `occurrence_categories`
+- `occurrence_subcategories`
+- `departments`
+- campos existentes de ocorrência: `category_id`, `subcategory_id`, `department_id`, `priority`, `sla_due_at`, `public_message`
+- `payload_json` de `whatsapp_messages` para guardar a sugestão calculada junto da mensagem
+
+Nenhuma sugestão substitui automaticamente a decisão do agente. O sistema só aplica categoria, setor, prioridade, mensagem pública e SLA depois de confirmação explícita na interface.
