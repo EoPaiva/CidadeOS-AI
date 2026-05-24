@@ -232,6 +232,82 @@ function computeSla(priority) {
   d.setHours(d.getHours() + (priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168));
   return d.toISOString();
 }
+function triageSlaHours(priority) { return priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168; }
+function normalizeRuleText(value = '') {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+const localTriageRules = [
+  { key: 'defesa_civil', priority: 'CRITICA', keywords: ['alagamento', 'alag', 'enchente', 'arvore', 'queda de arvore', 'deslizamento', 'area de risco', 'risco imediato', 'desabamento'], publicMessage: 'Solicitação de risco recebida para avaliação prioritária da equipe responsável.', departmentHints: ['defesa', 'risco'] },
+  { key: 'saude_publica', priority: 'ALTA', keywords: ['dengue', 'mosquito', 'agua parada', 'foco', 'terreno abandonado', 'terreno'], publicMessage: 'Solicitação relacionada à saúde pública recebida para vistoria da equipe responsável.', departmentHints: ['vigilancia', 'saude', 'sanitaria'] },
+  { key: 'agua_saneamento', priority: 'ALTA', keywords: ['vazamento', 'falta d agua', 'falta dagua', 'falta de agua', 'sem agua', 'esgoto', 'baixa pressao'], publicMessage: 'Solicitação de água ou saneamento recebida para encaminhamento técnico.', departmentHints: ['saneamento', 'agua', 'esgoto'] },
+  { key: 'assistencia_social', priority: 'ALTA', keywords: ['idoso', 'idosa', 'vulneravel', 'assistencia', 'morador de rua', 'visita', 'ajuda'], publicMessage: 'Solicitação de assistência social recebida para acolhimento e triagem da equipe responsável.', departmentHints: ['social', 'assistencia'] },
+  { key: 'zona_rural', priority: 'MEDIA', keywords: ['estrada rural', 'ponte', 'sitio', 'zona rural', 'acesso bloqueado', 'roca', 'rural'], publicMessage: 'Solicitação da zona rural recebida para avaliação do setor territorial responsável.', departmentHints: ['rural'] },
+  { key: 'urbano', priority: 'MEDIA', keywords: ['buraco', 'lampada', 'poste', 'iluminacao', 'lixo', 'mato', 'praca', 'calcada'], publicMessage: 'Solicitação urbana recebida para análise e encaminhamento do setor responsável.', departmentHints: ['obras', 'servicos', 'urbano'] }
+];
+const categoryRuleHints = {
+  defesa_civil: ['defesa_civil', 'defesa civil', 'defesa', 'clima'],
+  saude_publica: ['saude_publica', 'saude publica', 'saude', 'dengue', 'vigilancia'],
+  agua_saneamento: ['agua_saneamento', 'agua e saneamento', 'saneamento', 'agua'],
+  assistencia_social: ['assistencia_social', 'assistencia social', 'social'],
+  zona_rural: ['zona_rural', 'zona rural', 'rural'],
+  urbano: ['urbano', 'zeladoria', 'obras']
+};
+function localRuleMatches(text, keywords) {
+  return keywords.filter((keyword) => text.includes(normalizeRuleText(keyword)));
+}
+function pickRuleCategory(categories = [], key = 'urbano', cityId = '') {
+  const hints = categoryRuleHints[key] || [key];
+  return categories.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.key || ''} ${item.id || ''} ${item.name || ''}`).includes(normalizeRuleText(hint)))) || categories.find((item) => !cityId || !item.cityId || item.cityId === cityId) || categories[0] || null;
+}
+function pickRuleDepartment(departments = [], category = null, rule = {}, cityId = '') {
+  const fromCategory = departments.find((item) => item.id === category?.defaultDepartmentId);
+  if (fromCategory) return fromCategory;
+  const hints = rule.departmentHints || [];
+  return departments.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.name || ''} ${item.description || ''}`).includes(normalizeRuleText(hint)))) || departments.find((item) => !cityId || !item.cityId || item.cityId === cityId) || departments[0] || null;
+}
+function pickRuleSubcategory(subcategories = [], categoryId = '', matchedKeywords = []) {
+  const list = subcategories.filter((item) => item.categoryId === categoryId);
+  const normalizedKeywords = matchedKeywords.map(normalizeRuleText);
+  return list.find((item) => normalizedKeywords.some((keyword) => normalizeRuleText(`${item.key || ''} ${item.name || ''}`).includes(keyword) || keyword.includes(normalizeRuleText(item.name || '')))) || list[0] || null;
+}
+function buildLocalTriageSuggestion({ text = '', categories = [], departments = [], subcategories = [], cityId = '' } = {}) {
+  const normalized = normalizeRuleText(text);
+  const priorityWeight = { BAIXA: 1, MEDIA: 2, ALTA: 3, CRITICA: 4 };
+  let selected = null;
+  for (const rule of localTriageRules) {
+    const matched = localRuleMatches(normalized, rule.keywords);
+    if (!matched.length) continue;
+    if (!selected || matched.length > selected.matched.length || priorityWeight[rule.priority] > priorityWeight[selected.rule.priority]) selected = { rule, matched };
+  }
+  const fallbackRule = localTriageRules.find((item) => item.key === 'urbano');
+  const rule = selected?.rule || fallbackRule;
+  const matchedKeywords = [...new Set(selected?.matched || [])];
+  let priority = rule.priority;
+  if (rule.key === 'zona_rural' && /(bloquead|interdit|risco|queda|ponte.*cai)/.test(normalized)) priority = 'ALTA';
+  if (rule.key === 'urbano' && /(risco|acidente|perigo|muito grande|poste caindo)/.test(normalized)) priority = 'ALTA';
+  const category = pickRuleCategory(categories, rule.key, cityId);
+  const department = pickRuleDepartment(departments, category, rule, cityId);
+  const subcategory = pickRuleSubcategory(subcategories, category?.id, matchedKeywords);
+  const confidence = matchedKeywords.length ? Math.min(0.95, 0.55 + (matchedKeywords.length * 0.1) + (priority === 'CRITICA' ? 0.08 : 0)) : 0.35;
+  return {
+    source: 'rules_local_v1',
+    categoryId: category?.id || null,
+    categoryName: category?.name || 'Triagem manual',
+    categoryKey: rule.key,
+    subcategoryId: subcategory?.id || null,
+    subcategoryName: subcategory?.name || '',
+    departmentId: department?.id || category?.defaultDepartmentId || null,
+    departmentName: department?.name || '',
+    priority,
+    publicMessage: rule.publicMessage,
+    slaDueAt: computeSla(priority),
+    slaHours: triageSlaHours(priority),
+    confidence,
+    confidenceLabel: confidence >= 0.75 ? 'Alta' : confidence >= 0.5 ? 'Média' : 'Baixa',
+    matchedKeywords,
+    reason: matchedKeywords.length ? `Regra local por palavra-chave: ${matchedKeywords.join(', ')}.` : 'Sem palavra-chave forte; sugestão inicial conservadora.'
+  };
+}
 async function occurrenceLookups(cityId, occurrenceIds = []) {
   const [neighborhoods, departments, categories, subcategories, users, history, comments, attachmentRows, cities] = await Promise.all([
     supa(`neighborhoods?city_id=eq.${cityId}&select=*`).then(r => r.map(neighborhoodFromDb)),
@@ -268,15 +344,9 @@ function messageFromDb(m, occurrence = null) {
   const mediaId = payload.mediaId || payload.raw?.image?.id || payload.raw?.document?.id || payload.raw?.audio?.id || payload.raw?.video?.id || '';
   return { id: m.id, cityId: m.city_id, channelId: m.channel_id, conversationId: m.conversation_id, occurrenceId: m.occurrence_id, citizenPhone: m.citizen_phone, direction: directionFromDb[m.direction] || m.direction, status: processingFromDb[m.processing_status] || m.processing_status, processingStatus: processingFromDb[m.processing_status] || m.processing_status, messageType: m.message_type || 'text', messageBody: m.message_body || '', preparedReply: m.prepared_response || '', metaMessageId: m.meta_message_id || '', payloadJson: payload, errorMessage: m.error_message || '', mediaId, mediaMimeType, mediaStorageBucket, mediaStoragePath, mediaDownloadedAt: m.media_downloaded_at || null, hasMedia: Boolean(mediaId || mediaStoragePath), mediaDownloadPending: Boolean(mediaId && !mediaStoragePath), mediaDownloadError: mediaId && !mediaStoragePath ? (m.error_message || storedMedia.reason || '') : '', createdAt: m.created_at, processedAt: m.processed_at, occurrence };
 }
-function inferCategory(categories, text = '') {
-  const s = String(text).toLowerCase();
-  const findKey = (key) => categories.find(c => c.key === key) || categories[0];
-  if (/(dengue|mosquito|água parada|agua parada|terreno)/.test(s)) return [findKey('saude_publica'), 'ALTA'];
-  if (/(alag|enchente|árvore|arvore|desliz|risco|queda)/.test(s)) return [findKey('defesa_civil'), 'CRITICA'];
-  if (/(vazamento|falta d|sem água|sem agua|esgoto|pressão|pressao)/.test(s)) return [findKey('agua_saneamento'), 'ALTA'];
-  if (/(idoso|idosa|vulner|assistência|assistencia|visita)/.test(s)) return [findKey('assistencia_social'), 'ALTA'];
-  if (/(rural|ponte|estrada|sítio|sitio|roça)/.test(s)) return [findKey('zona_rural'), 'MEDIA'];
-  return [findKey('urbano'), /(perigo|acidente|grande|risco)/.test(s) ? 'ALTA' : 'MEDIA'];
+function inferCategory(categories, text = '', departments = [], subcategories = [], cityId = '') {
+  const suggestion = buildLocalTriageSuggestion({ text, categories, departments, subcategories, cityId });
+  return [categories.find(c => c.id === suggestion.categoryId) || categories[0], suggestion.priority, suggestion];
 }
 function metrics(rows) {
   const openStatuses = new Set(['recebido','em_analise','encaminhado','em_execucao','aguardando_terceiro','aguardando_cidadao']);
@@ -639,6 +709,11 @@ export default async function handler(req, res) {
         body: JSON.stringify([{ city_id: hookCityId, channel_id: channel?.id || null, event_type: 'whatsapp_webhook', payload_json: body, processed: false }])
       });
       const parsed = extractWhatsAppWebhookMessages(body);
+      const [categories, departments, subcategories] = await Promise.all([
+        supa('occurrence_categories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(categoryFromDb)),
+        supa(`departments?city_id=eq.${hookCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(departmentFromDb)),
+        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb))
+      ]);
       const inserted = [];
       for (const item of parsed) {
         try {
@@ -650,6 +725,7 @@ export default async function handler(req, res) {
             continue;
           }
           const conversation = await upsertWhatsAppConversation({ cityId: hookCityId, channelId: channel?.id || null, phone: item.from });
+          const suggestion = buildLocalTriageSuggestion({ text: item.body, categories, departments, subcategories, cityId: hookCityId });
           const rows = await supa('whatsapp_messages', {
             method: 'POST',
             body: JSON.stringify([{
@@ -669,6 +745,9 @@ export default async function handler(req, res) {
                 mediaMimeType: item.mediaMimeType,
                 mediaSha256: item.mediaSha256,
                 phoneNumberId: item.phoneNumberId,
+                suggestedCategoryId: suggestion.categoryId,
+                suggestedPriority: suggestion.priority,
+                localTriageSuggestion: suggestion,
                 raw: item.raw
               }
             }])
@@ -874,6 +953,17 @@ export default async function handler(req, res) {
     const user = await currentUser(req);
     if (!user) return fail(res, 401, 'Entre para acessar o painel.');
 
+    if (pathname === '/api/triage/suggest' && req.method === 'POST') {
+      const targetCityId = user.cityId || cityId;
+      const [categories, departments, subcategories] = await Promise.all([
+        supa('occurrence_categories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(categoryFromDb)),
+        supa(`departments?city_id=eq.${targetCityId}&active=eq.true&select=*&order=name.asc`).then(r => r.map(departmentFromDb)),
+        supa('occurrence_subcategories?active=eq.true&select=*&order=sort_order.asc').then(r => r.map(subcategoryFromDb))
+      ]);
+      const text = [body.text, body.title, body.description, body.address, body.referencePoint, body.messageBody].filter(Boolean).join(' ');
+      return ok(res, { suggestion: buildLocalTriageSuggestion({ text, categories, departments, subcategories, cityId: targetCityId }) });
+    }
+
     if (pathname === '/api/dashboard/city' && req.method === 'GET') {
       const rows = await supa(`occurrences?city_id=eq.${user.cityId || cityId}&select=*&order=created_at.desc`);
       const recentRows = rows.slice(0, 8);
@@ -922,8 +1012,48 @@ export default async function handler(req, res) {
     }
     const occPriority = pathname.match(/^\/api\/occurrences\/([^/]+)\/priority$/);
     if (occPriority && req.method === 'PATCH') {
-      const rows = await supa(`occurrences?id=eq.${occPriority[1]}`, { method: 'PATCH', body: JSON.stringify({ priority: dbPriority(body.priority) }) });
+      const priority = String(body.priority || '').toUpperCase();
+      const rows = await supa(`occurrences?id=eq.${occPriority[1]}`, { method: 'PATCH', body: JSON.stringify({ priority: dbPriority(priority), sla_due_at: computeSla(priority) }) });
       const [occ] = rows.length ? await serializeRows(rows, rows[0].city_id) : [null];
+      return ok(res, { occurrence: occ });
+    }
+    const occTriageSuggestion = pathname.match(/^\/api\/occurrences\/([^/]+)\/triage-suggestion$/);
+    if (occTriageSuggestion && req.method === 'PATCH') {
+      const id = decodeURIComponent(occTriageSuggestion[1]);
+      const encodedId = encodeURIComponent(id);
+      const oldRows = await supa(`occurrences?or=(id.eq.${encodedId},protocol.eq.${encodedId})&select=*&limit=1`);
+      const old = oldRows[0];
+      if (!old) return fail(res, 404, 'Ocorrência não encontrada.');
+      if (user.cityId && user.cityId !== old.city_id) return fail(res, 403, 'Acesso restrito para esta cidade.');
+      const suggestion = body.suggestion || {};
+      const pickSuggested = (key) => Object.prototype.hasOwnProperty.call(body, key) ? body[key] : suggestion[key];
+      const updates = { updated_at: new Date().toISOString() };
+      const categoryId = pickSuggested('categoryId');
+      const subcategoryId = pickSuggested('subcategoryId');
+      const departmentId = pickSuggested('departmentId');
+      const priority = String(pickSuggested('priority') || '').toUpperCase();
+      const publicMessage = String(pickSuggested('publicMessage') || '').trim();
+      if (categoryId) {
+        const category = (await supa(`occurrence_categories?id=eq.${encodeURIComponent(categoryId)}&active=eq.true&select=*&limit=1`))[0];
+        if (category) updates.category_id = category.id;
+      }
+      if (subcategoryId) {
+        const subcategory = (await supa(`occurrence_subcategories?id=eq.${encodeURIComponent(subcategoryId)}&active=eq.true&select=*&limit=1`))[0];
+        if (subcategory) updates.subcategory_id = subcategory.id;
+      }
+      if (departmentId) {
+        const department = (await supa(`departments?id=eq.${encodeURIComponent(departmentId)}&city_id=eq.${old.city_id}&active=eq.true&select=*&limit=1`))[0];
+        if (department) updates.department_id = department.id;
+      }
+      if (['BAIXA', 'MEDIA', 'ALTA', 'CRITICA'].includes(priority)) {
+        updates.priority = dbPriority(priority);
+        updates.sla_due_at = computeSla(priority);
+      }
+      if (publicMessage) updates.public_message = publicMessage;
+      const rows = await supa(`occurrences?id=eq.${old.id}`, { method: 'PATCH', body: JSON.stringify(updates) });
+      await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{ occurrence_id: old.id, city_id: old.city_id, changed_by: user.id, old_status: old.status, new_status: old.status, public_message: updates.public_message || old.public_message || null, visibility: 'publica' }]) });
+      await audit(old.city_id, user.id, 'LOCAL_TRIAGE_SUGGESTION_APPLIED', 'Occurrence', old.id, { before: { categoryId: old.category_id, subcategoryId: old.subcategory_id, departmentId: old.department_id, priority: old.priority }, updates, confidence: suggestion.confidence, source: suggestion.source });
+      const [occ] = rows.length ? await serializeRows(rows, old.city_id) : [null];
       return ok(res, { occurrence: occ });
     }
     const occAssign = pathname.match(/^\/api\/occurrences\/([^/]+)\/assign$/);
@@ -1136,10 +1266,15 @@ export default async function handler(req, res) {
       return ok(res, { ...result, outboundMessage: messageFromDb(rows[0]) });
     }
     if (pathname === '/api/whatsapp/simulate-message' && req.method === 'POST') {
-      const cats = (await supa('occurrence_categories?active=eq.true&select=*')).map(categoryFromDb);
-      const [cat, pri] = inferCategory(cats, body.messageBody);
-      const channel = (await supa(`whatsapp_channels?city_id=eq.${user.cityId || cityId}&select=*&limit=1`))[0];
-      const rows = await supa('whatsapp_messages', { method: 'POST', body: JSON.stringify([{ city_id: user.cityId || cityId, channel_id: channel?.id || null, citizen_phone: body.citizenPhone || '5511999990000', direction: 'received', processing_status: 'pendente_triagem', message_type: 'text', message_body: body.messageBody || '', prepared_response: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payload_json: { suggestedCategoryId: cat?.id, suggestedPriority: pri, simulated: true } }]) });
+      const targetCityId = user.cityId || cityId;
+      const [cats, deps, subs] = await Promise.all([
+        supa('occurrence_categories?active=eq.true&select=*').then(r => r.map(categoryFromDb)),
+        supa(`departments?city_id=eq.${targetCityId}&active=eq.true&select=*`).then(r => r.map(departmentFromDb)),
+        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb))
+      ]);
+      const [cat, pri, suggestion] = inferCategory(cats, body.messageBody, deps, subs, targetCityId);
+      const channel = (await supa(`whatsapp_channels?city_id=eq.${targetCityId}&select=*&limit=1`))[0];
+      const rows = await supa('whatsapp_messages', { method: 'POST', body: JSON.stringify([{ city_id: targetCityId, channel_id: channel?.id || null, citizen_phone: body.citizenPhone || '5511999990000', direction: 'received', processing_status: 'pendente_triagem', message_type: 'text', message_body: body.messageBody || '', prepared_response: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payload_json: { suggestedCategoryId: cat?.id, suggestedPriority: pri, localTriageSuggestion: suggestion, simulated: true } }]) });
       return ok(res, { message: messageFromDb(rows[0]) });
     }
     const waCreate = pathname.match(/^\/api\/whatsapp\/messages\/([^/]+)\/create-occurrence$/);
@@ -1154,10 +1289,14 @@ export default async function handler(req, res) {
           return ok(res, { occurrence: serialized, message: messageFromDb(msg, serialized), mediaAttachment, alreadyConverted: true });
         }
       }
-      const cats = (await supa('occurrence_categories?active=eq.true&select=*')).map(categoryFromDb);
-      const [cat, pri] = inferCategory(cats, msg.message_body);
+      const [cats, deps, subs] = await Promise.all([
+        supa('occurrence_categories?active=eq.true&select=*').then(r => r.map(categoryFromDb)),
+        supa(`departments?city_id=eq.${msg.city_id}&active=eq.true&select=*`).then(r => r.map(departmentFromDb)),
+        supa('occurrence_subcategories?active=eq.true&select=*').then(r => r.map(subcategoryFromDb))
+      ]);
+      const [cat, pri, suggestion] = inferCategory(cats, msg.message_body, deps, subs, msg.city_id);
       const categoryRow = await supa(`occurrence_categories?id=eq.${cat.id}&select=*`).then(r => r[0]);
-      const occRows = await supa('occurrences', { method: 'POST', body: JSON.stringify([{ city_id: msg.city_id, title: 'Ocorrência recebida pelo WhatsApp', description: msg.message_body || '', category_id: cat.id, department_id: categoryRow?.default_department_id || null, priority: dbPriority(pri), status: 'recebido', origin: 'whatsapp', source_channel: 'whatsapp', citizen_phone: msg.citizen_phone, reference_point: 'Relato recebido pelo WhatsApp', public_visibility: true, sla_due_at: computeSla(pri), public_message: 'Ocorrência registrada a partir do canal oficial de WhatsApp.' }]) });
+      const occRows = await supa('occurrences', { method: 'POST', body: JSON.stringify([{ city_id: msg.city_id, title: 'Ocorrência recebida pelo WhatsApp', description: msg.message_body || '', category_id: cat.id, subcategory_id: suggestion.subcategoryId || null, department_id: suggestion.departmentId || categoryRow?.default_department_id || null, priority: dbPriority(pri), status: 'recebido', origin: 'whatsapp', source_channel: 'whatsapp', citizen_phone: msg.citizen_phone, reference_point: 'Relato recebido pelo WhatsApp', public_visibility: true, sla_due_at: computeSla(pri), public_message: suggestion.publicMessage || 'Ocorrência registrada a partir do canal oficial de WhatsApp.' }]) });
       const occ = occRows[0];
       const messagePatch = { processing_status: 'convertido_ocorrencia', occurrence_id: occ.id, prepared_response: `Sua solicitação foi registrada com sucesso. Protocolo: ${occ.protocol}.`, processed_at: new Date().toISOString() };
       const updatedRows = await supa(`whatsapp_messages?id=eq.${msg.id}`, { method: 'PATCH', body: JSON.stringify(messagePatch) });

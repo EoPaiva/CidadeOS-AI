@@ -15,6 +15,8 @@ const state = {
   activeWhatsappMessage: null,
   occurrences: [],
   modalOccurrence: null,
+  triageSuggestions: {},
+  triageSuggestionModes: {},
   lastProtocol: sessionStorage.getItem('cidadeos_last_protocol') || ''
 };
 
@@ -250,6 +252,82 @@ function demoTokenUser() { try { return JSON.parse(localStorage.getItem('cidadeo
 function demoPublicUser(user) { return user ? { id: user.id, cityId: user.cityId, name: user.name, email: user.email, role: user.role, departmentId: user.departmentId || null } : null; }
 function demoNextProtocol(db) { const y = new Date().getFullYear(); return `CID-${y}-${String(db.meta.nextProtocolNumber++).padStart(6, '0')}`; }
 function demoComputeSla(priority) { const d = new Date(); d.setHours(d.getHours() + (priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168)); return d.toISOString(); }
+function triageSlaHours(priority) { return priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168; }
+function normalizeRuleText(value = '') {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+const localTriageRules = [
+  { key: 'defesa_civil', priority: 'CRITICA', keywords: ['alagamento', 'alag', 'enchente', 'arvore', 'queda de arvore', 'deslizamento', 'area de risco', 'risco imediato', 'desabamento'], publicMessage: 'Solicitação de risco recebida para avaliação prioritária da equipe responsável.', departmentHints: ['defesa', 'risco'] },
+  { key: 'saude_publica', priority: 'ALTA', keywords: ['dengue', 'mosquito', 'agua parada', 'foco', 'terreno abandonado', 'terreno'], publicMessage: 'Solicitação relacionada à saúde pública recebida para vistoria da equipe responsável.', departmentHints: ['vigilancia', 'saude', 'sanitaria'] },
+  { key: 'agua_saneamento', priority: 'ALTA', keywords: ['vazamento', 'falta d agua', 'falta dagua', 'falta de agua', 'sem agua', 'esgoto', 'baixa pressao'], publicMessage: 'Solicitação de água ou saneamento recebida para encaminhamento técnico.', departmentHints: ['saneamento', 'agua', 'esgoto'] },
+  { key: 'assistencia_social', priority: 'ALTA', keywords: ['idoso', 'idosa', 'vulneravel', 'assistencia', 'morador de rua', 'visita', 'ajuda'], publicMessage: 'Solicitação de assistência social recebida para acolhimento e triagem da equipe responsável.', departmentHints: ['social', 'assistencia'] },
+  { key: 'zona_rural', priority: 'MEDIA', keywords: ['estrada rural', 'ponte', 'sitio', 'zona rural', 'acesso bloqueado', 'roca', 'rural'], publicMessage: 'Solicitação da zona rural recebida para avaliação do setor territorial responsável.', departmentHints: ['rural'] },
+  { key: 'urbano', priority: 'MEDIA', keywords: ['buraco', 'lampada', 'poste', 'iluminacao', 'lixo', 'mato', 'praca', 'calcada'], publicMessage: 'Solicitação urbana recebida para análise e encaminhamento do setor responsável.', departmentHints: ['obras', 'servicos', 'urbano'] }
+];
+const categoryRuleHints = {
+  defesa_civil: ['defesa_civil', 'defesa civil', 'defesa', 'clima'],
+  saude_publica: ['saude_publica', 'saude publica', 'saude', 'dengue', 'vigilancia'],
+  agua_saneamento: ['agua_saneamento', 'agua e saneamento', 'saneamento', 'agua'],
+  assistencia_social: ['assistencia_social', 'assistencia social', 'social'],
+  zona_rural: ['zona_rural', 'zona rural', 'rural'],
+  urbano: ['urbano', 'zeladoria', 'obras']
+};
+function localRuleMatches(text, keywords) {
+  return keywords.filter((keyword) => text.includes(normalizeRuleText(keyword)));
+}
+function pickRuleCategory(categories = [], key = 'urbano', cityId = '') {
+  const hints = categoryRuleHints[key] || [key];
+  return categories.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.key || ''} ${item.id || ''} ${item.name || ''}`).includes(normalizeRuleText(hint)))) || categories.find((item) => !cityId || !item.cityId || item.cityId === cityId) || categories[0] || null;
+}
+function pickRuleDepartment(departments = [], category = null, rule = {}, cityId = '') {
+  const fromCategory = departments.find((item) => item.id === category?.defaultDepartmentId);
+  if (fromCategory) return fromCategory;
+  const hints = rule.departmentHints || [];
+  return departments.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.name || ''} ${item.description || ''}`).includes(normalizeRuleText(hint)))) || departments.find((item) => !cityId || !item.cityId || item.cityId === cityId) || departments[0] || null;
+}
+function pickRuleSubcategory(subcategories = [], categoryId = '', matchedKeywords = []) {
+  const list = subcategories.filter((item) => item.categoryId === categoryId);
+  const normalizedKeywords = matchedKeywords.map(normalizeRuleText);
+  return list.find((item) => normalizedKeywords.some((keyword) => normalizeRuleText(`${item.key || ''} ${item.name || ''}`).includes(keyword) || keyword.includes(normalizeRuleText(item.name || '')))) || list[0] || null;
+}
+function buildLocalTriageSuggestion({ text = '', categories = [], departments = [], subcategories = [], cityId = '', computeSla = demoComputeSla } = {}) {
+  const normalized = normalizeRuleText(text);
+  const priorityWeight = { BAIXA: 1, MEDIA: 2, ALTA: 3, CRITICA: 4 };
+  let selected = null;
+  for (const rule of localTriageRules) {
+    const matched = localRuleMatches(normalized, rule.keywords);
+    if (!matched.length) continue;
+    if (!selected || matched.length > selected.matched.length || priorityWeight[rule.priority] > priorityWeight[selected.rule.priority]) selected = { rule, matched };
+  }
+  const fallbackRule = localTriageRules.find((item) => item.key === 'urbano');
+  const rule = selected?.rule || fallbackRule;
+  const matchedKeywords = [...new Set(selected?.matched || [])];
+  let priority = rule.priority;
+  if (rule.key === 'zona_rural' && /(bloquead|interdit|risco|queda|ponte.*cai)/.test(normalized)) priority = 'ALTA';
+  if (rule.key === 'urbano' && /(risco|acidente|perigo|muito grande|poste caindo)/.test(normalized)) priority = 'ALTA';
+  const category = pickRuleCategory(categories, rule.key, cityId);
+  const department = pickRuleDepartment(departments, category, rule, cityId);
+  const subcategory = pickRuleSubcategory(subcategories, category?.id, matchedKeywords);
+  const confidence = matchedKeywords.length ? Math.min(0.95, 0.55 + (matchedKeywords.length * 0.1) + (priority === 'CRITICA' ? 0.08 : 0)) : 0.35;
+  return {
+    source: 'rules_local_v1',
+    categoryId: category?.id || null,
+    categoryName: category?.name || 'Triagem manual',
+    categoryKey: rule.key,
+    subcategoryId: subcategory?.id || null,
+    subcategoryName: subcategory?.name || '',
+    departmentId: department?.id || category?.defaultDepartmentId || null,
+    departmentName: department?.name || '',
+    priority,
+    publicMessage: rule.publicMessage,
+    slaDueAt: computeSla(priority),
+    slaHours: triageSlaHours(priority),
+    confidence,
+    confidenceLabel: confidence >= 0.75 ? 'Alta' : confidence >= 0.5 ? 'Média' : 'Baixa',
+    matchedKeywords,
+    reason: matchedKeywords.length ? `Regra local por palavra-chave: ${matchedKeywords.join(', ')}.` : 'Sem palavra-chave forte; sugestão inicial conservadora.'
+  };
+}
 function demoSerializeOccurrence(db, occ) {
   return { ...occ,
     city: db.cities.find(x => x.id === occ.cityId) || null,
@@ -326,14 +404,8 @@ function demoMetrics(db, rows) {
   return { total: rows.length, open: open.length, resolved: rows.filter(x => x.status === 'RESOLVIDO').length, overdue: rows.filter(x => x.slaDueAt && new Date(x.slaDueAt) < new Date() && !['RESOLVIDO','CANCELADO','DUPLICADO','ARQUIVADO'].includes(x.status)).length, critical: rows.filter(x => x.priority === 'CRITICA').length, byStatus: countBy(x => x.status), byPriority: countBy(x => x.priority), byDepartment: countBy(x => db.departments.find(d => d.id === x.departmentId)?.name), byNeighborhood: countBy(x => db.neighborhoods.find(n => n.id === x.neighborhoodId)?.name), byCategory: countBy(x => db.categories.find(c => c.id === x.categoryId)?.name) };
 }
 function demoSuggestFromMessage(db, message='') {
-  const text = message.toLowerCase();
-  const pick = (cat, pri) => ({ category: db.categories.find(c => c.id === cat) || db.categories[0], priority: pri });
-  if (/dengue|mosquito|água parada|agua parada|terreno/.test(text)) return pick('cat_saude_publica', 'ALTA');
-  if (/alag|enchente|árvore|arvore|risco|queda/.test(text)) return pick('cat_defesa_civil', 'CRITICA');
-  if (/vazamento|falta d.?água|esgoto|pressão|pressao/.test(text)) return pick('cat_agua_saneamento', 'ALTA');
-  if (/idoso|ajuda|vulner/.test(text)) return pick('cat_assistencia_social', 'ALTA');
-  if (/rural|ponte|estrada/.test(text)) return pick('cat_zona_rural', 'MEDIA');
-  return pick('cat_urbano', 'MEDIA');
+  const suggestion = buildLocalTriageSuggestion({ text: message, categories: db.categories, departments: db.departments, subcategories: db.subcategories, cityId: db.cities[0]?.id });
+  return { category: db.categories.find(c => c.id === suggestion.categoryId) || db.categories[0], priority: suggestion.priority, suggestion };
 }
 async function demoRequest(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
@@ -387,6 +459,11 @@ async function demoRequest(path, options = {}) {
     if (!occ) throw new Error('Ocorrência não encontrada.');
     return { ok: true, occurrence: demoSerializeOccurrence(db, occ), previewMode: true };
   }
+  if (pathname === '/api/triage/suggest' && method === 'POST') {
+    const text = [body.text, body.title, body.description, body.address, body.referencePoint, body.messageBody].filter(Boolean).join(' ');
+    const suggestion = buildLocalTriageSuggestion({ text, categories: db.categories, departments: db.departments, subcategories: db.subcategories, cityId: body.cityId || currentUser?.cityId || db.cities[0]?.id });
+    return { ok: true, suggestion, previewMode: true };
+  }
   const occStatus = pathname.match(/^\/api\/occurrences\/([^/]+)\/status$/);
   if (occStatus && ['PATCH','POST'].includes(method)) {
     const occ = db.occurrences.find(o => o.id === occStatus[1] || o.protocol === occStatus[1]);
@@ -397,6 +474,27 @@ async function demoRequest(path, options = {}) {
   }
   const occPriority = pathname.match(/^\/api\/occurrences\/([^/]+)\/priority$/);
   if (occPriority && method === 'PATCH') { const occ = db.occurrences.find(o => o.id === occPriority[1]); if (occ) { occ.priority = body.priority || occ.priority; occ.updatedAt = demoNowIso(); } return save({ ok: true, occurrence: occ ? demoSerializeOccurrence(db, occ) : null, previewMode: true }); }
+  const occTriageSuggestion = pathname.match(/^\/api\/occurrences\/([^/]+)\/triage-suggestion$/);
+  if (occTriageSuggestion && method === 'PATCH') {
+    const occ = db.occurrences.find(o => o.id === occTriageSuggestion[1] || o.protocol === occTriageSuggestion[1]);
+    if (!occ) throw new Error('Ocorrência não encontrada.');
+    const suggestion = body.suggestion || {};
+    const pickSuggested = (key) => Object.prototype.hasOwnProperty.call(body, key) ? body[key] : suggestion[key];
+    const category = db.categories.find(c => c.id === pickSuggested('categoryId')) || null;
+    const subcategory = db.subcategories.find(s => s.id === pickSuggested('subcategoryId') && (!category || s.categoryId === category.id)) || null;
+    const department = db.departments.find(d => d.id === pickSuggested('departmentId')) || null;
+    const priority = ['BAIXA','MEDIA','ALTA','CRITICA'].includes(String(pickSuggested('priority') || '').toUpperCase()) ? String(pickSuggested('priority')).toUpperCase() : occ.priority;
+    if (category) occ.categoryId = category.id;
+    if (subcategory) occ.subcategoryId = subcategory.id;
+    if (department) occ.departmentId = department.id;
+    occ.priority = priority;
+    occ.slaDueAt = demoComputeSla(priority);
+    occ.publicMessage = pickSuggested('publicMessage') || occ.publicMessage;
+    occ.updatedAt = demoNowIso();
+    db.statusHistory.push({ id: demoUuid('hist'), occurrenceId: occ.id, changedBy: currentUser?.id, oldStatus: occ.status, newStatus: occ.status, comment: 'Sugestão local de triagem aplicada após confirmação.', publicMessage: occ.publicMessage, createdAt: demoNowIso() });
+    db.auditLogs.push({ id: demoUuid('audit'), cityId: occ.cityId, userId: currentUser?.id, action: 'LOCAL_TRIAGE_SUGGESTION_APPLIED', entityType: 'Occurrence', entityId: occ.id, metadata: { categoryId: occ.categoryId, departmentId: occ.departmentId, priority, confidence: suggestion.confidence, source: suggestion.source }, createdAt: demoNowIso() });
+    return save({ ok: true, occurrence: demoSerializeOccurrence(db, occ), previewMode: true });
+  }
   const occAssign = pathname.match(/^\/api\/occurrences\/([^/]+)\/assign$/);
   if (occAssign && method === 'PATCH') { const occ = db.occurrences.find(o => o.id === occAssign[1]); if (occ) { occ.departmentId = body.departmentId || occ.departmentId; occ.assignedAgentId = body.assignedAgentId || occ.assignedAgentId; occ.updatedAt = demoNowIso(); } return save({ ok: true, occurrence: occ ? demoSerializeOccurrence(db, occ) : null, previewMode: true }); }
   const occDup = pathname.match(/^\/api\/occurrences\/([^/]+)\/mark-duplicate$/);
@@ -414,14 +512,14 @@ async function demoRequest(path, options = {}) {
   if (pathname === '/api/whatsapp/test') return { ok: true, message: 'Configuração validada no modo demonstrativo online.', previewMode: true };
   if (pathname === '/api/whatsapp/simulate-message' && method === 'POST') {
     const sug = demoSuggestFromMessage(db, body.messageBody);
-    const payloadJson = { suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, simulated: true };
+    const payloadJson = { suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, localTriageSuggestion: sug.suggestion, simulated: true };
     if (body.mediaId || body.mediaStoragePath) {
       payloadJson.mediaId = body.mediaId || demoUuid('wamedia');
       payloadJson.mediaMimeType = body.mediaMimeType || 'image/jpeg';
       payloadJson.storedMedia = body.mediaStoragePath ? { uploaded: true, bucket: 'occurrence-attachments', path: body.mediaStoragePath, contentType: payloadJson.mediaMimeType, size: Number(body.mediaSizeBytes || 0) } : { uploaded: false, reason: 'Mídia simulada aguardando download.' };
     }
     const media = whatsappMessageMediaState({ payloadJson });
-    const msg = { id: demoUuid('wam'), cityId: db.cities[0].id, channelId: db.whatsappChannels[0].id, citizenPhone: body.citizenPhone || '5511999990000', direction: 'INBOUND', messageType: media.hasMedia ? 'image' : 'text', messageBody: body.messageBody || '', suggestedCategoryId: sug.category.id, suggestedPriority: sug.priority, status: 'RECEBIDA_PENDENTE_TRIAGEM', preparedReply: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payloadJson, mediaId: media.mediaId, mediaMimeType: media.contentType, mediaStoragePath: media.storagePath, hasMedia: media.hasMedia, createdAt: demoNowIso() };
+    const msg = { id: demoUuid('wam'), cityId: db.cities[0].id, channelId: db.whatsappChannels[0].id, citizenPhone: body.citizenPhone || '5511999990000', direction: 'INBOUND', messageType: media.hasMedia ? 'image' : 'text', messageBody: body.messageBody || '', suggestedCategoryId: sug.category.id, suggestedDepartmentId: sug.suggestion.departmentId, suggestedPriority: sug.priority, status: 'RECEBIDA_PENDENTE_TRIAGEM', preparedReply: 'Recebemos sua mensagem. Para registrar corretamente, informe bairro, rua ou ponto de referência.', payloadJson, mediaId: media.mediaId, mediaMimeType: media.contentType, mediaStoragePath: media.storagePath, hasMedia: media.hasMedia, createdAt: demoNowIso() };
     db.whatsappMessages.push(msg);
     return save({ ok: true, message: msg, previewMode: true });
   }
@@ -436,8 +534,9 @@ async function demoRequest(path, options = {}) {
         return save({ ok: true, occurrence: demoSerializeOccurrence(db, existing), message: msg, mediaAttachment, alreadyConverted: true, previewMode: true });
       }
     }
-    const cat = db.categories.find(c => c.id === msg.suggestedCategoryId) || db.categories[0];
-    const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: 'Ocorrência recebida pelo WhatsApp', description: msg.messageBody, categoryId: cat.id, subcategoryId: null, neighborhoodId: null, departmentId: cat.defaultDepartmentId, assignedAgentId: null, citizenId: null, priority: msg.suggestedPriority || 'MEDIA', status: 'RECEBIDO', address: '', referencePoint: 'Relato recebido pelo WhatsApp', publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(msg.suggestedPriority || 'MEDIA'), publicMessage: 'Ocorrência registrada a partir do canal oficial de WhatsApp.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() };
+    const suggestion = msg.payloadJson?.localTriageSuggestion || buildLocalTriageSuggestion({ text: msg.messageBody, categories: db.categories, departments: db.departments, subcategories: db.subcategories, cityId: msg.cityId });
+    const cat = db.categories.find(c => c.id === (msg.suggestedCategoryId || suggestion.categoryId)) || db.categories[0];
+    const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: 'Ocorrência recebida pelo WhatsApp', description: msg.messageBody, categoryId: cat.id, subcategoryId: suggestion.subcategoryId || null, neighborhoodId: null, departmentId: suggestion.departmentId || cat.defaultDepartmentId, assignedAgentId: null, citizenId: null, priority: msg.suggestedPriority || suggestion.priority || 'MEDIA', status: 'RECEBIDO', address: '', referencePoint: 'Relato recebido pelo WhatsApp', publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(msg.suggestedPriority || suggestion.priority || 'MEDIA'), publicMessage: suggestion.publicMessage || 'Ocorrência registrada a partir do canal oficial de WhatsApp.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() };
     db.occurrences.push(occ);
     msg.status = 'CONVERTIDA_EM_OCORRENCIA';
     msg.occurrenceId = occ.id;
@@ -1081,13 +1180,23 @@ function whatsappMediaStatusHtml(row = {}) {
   return `<br><small><span class="badge warning">Mídia pendente</span> Aguardando download para evidência.</small>`;
 }
 
+function whatsappTriageSuggestion(row = {}) {
+  const payload = row.payloadJson || row.payload_json || {};
+  const suggestion = payload.localTriageSuggestion || payload.triageSuggestion || {};
+  const category = suggestion.categoryName || (state.bootstrap?.categories || []).find(c => c.id === (row.suggestedCategoryId || payload.suggestedCategoryId))?.name || '';
+  const priority = suggestion.priority || row.suggestedPriority || payload.suggestedPriority || '';
+  const confidence = suggestion.confidenceLabel || (suggestion.confidence ? `${Math.round(suggestion.confidence * 100)}%` : '');
+  const pieces = [category, priorityLabels[priority] || priority, confidence ? `confiança ${confidence}` : ''].filter(Boolean);
+  return pieces.length ? pieces.join(' · ') : 'triagem manual';
+}
+
 function whatsappTriageTable(rows = []) {
   if (!rows.length) return empty('Nenhuma mensagem recebida pelo WhatsApp ainda. Use a simulação local ou configure o webhook da Meta.');
   return `<div class="data-table-wrap"><table class="gov-table"><thead><tr><th>Status</th><th>Cidadão</th><th>Mensagem</th><th>Protocolo</th><th>Ações</th></tr></thead><tbody>${rows.map(row => {
     const linked = row.occurrence ? `${row.occurrence.protocol} · ${statusLabels[row.occurrence.status] || row.occurrence.status}` : 'Sem protocolo';
     const canTriage = !row.occurrenceId && !row.occurrence && !['CONVERTIDA_EM_OCORRENCIA','VINCULADA_A_PROTOCOLO'].includes(row.status);
     const triageActions = canTriage ? `<button class="gov-button small primary" data-wa-create-occurrence="${escapeHtml(row.id)}">Criar ocorrência</button><button class="gov-button small" data-wa-more-info="${escapeHtml(row.id)}">Solicitar dados</button><button class="gov-button small" data-wa-link-message="${escapeHtml(row.id)}">Vincular</button>` : '';
-    return `<tr><td>${badgeWhatsappStatus(row.status)}</td><td>${escapeHtml(row.citizenPhone || 'Não informado')}<br><small>${fmtDate(row.createdAt)}</small></td><td>${escapeHtml(row.messageBody || '')}${whatsappMediaStatusHtml(row)}<br><small>Sugestão: ${escapeHtml(priorityLabels[row.suggestedPriority] || row.suggestedPriority || 'triagem manual')}</small></td><td>${escapeHtml(linked)}</td><td><div class="quick-actions">${triageActions}<button class="gov-button small ghost" data-wa-archive="${escapeHtml(row.id)}">Arquivar</button></div>${row.preparedReply ? `<details class="prepared-reply"><summary>Resposta preparada</summary><p>${escapeHtml(row.preparedReply)}</p><button class="gov-button small" data-copy-text="${escapeHtml(row.preparedReply)}">Copiar resposta</button><button class="gov-button small primary" data-wa-send-prepared="${escapeHtml(row.id)}">Enviar WhatsApp real</button></details>` : ''}</td></tr>`;
+    return `<tr><td>${badgeWhatsappStatus(row.status)}</td><td>${escapeHtml(row.citizenPhone || 'Não informado')}<br><small>${fmtDate(row.createdAt)}</small></td><td>${escapeHtml(row.messageBody || '')}${whatsappMediaStatusHtml(row)}<br><small>Sugestão: ${escapeHtml(whatsappTriageSuggestion(row))}</small></td><td>${escapeHtml(linked)}</td><td><div class="quick-actions">${triageActions}<button class="gov-button small ghost" data-wa-archive="${escapeHtml(row.id)}">Arquivar</button></div>${row.preparedReply ? `<details class="prepared-reply"><summary>Resposta preparada</summary><p>${escapeHtml(row.preparedReply)}</p><button class="gov-button small" data-copy-text="${escapeHtml(row.preparedReply)}">Copiar resposta</button><button class="gov-button small primary" data-wa-send-prepared="${escapeHtml(row.id)}">Enviar WhatsApp real</button></details>` : ''}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 
@@ -1620,6 +1729,43 @@ async function openOccurrenceDetail(id) {
   }
 }
 
+function renderTriageSuggestionPanel(occ) {
+  const key = occ.id || occ.protocol;
+  const suggestion = state.triageSuggestions[key];
+  const mode = state.triageSuggestionModes[key] || 'view';
+  const categories = state.bootstrap?.categories || [];
+  const departments = state.panelData?.departments || [];
+  if (!suggestion) {
+    return `<div class="quick-actions"><button class="gov-button small primary" type="button" data-generate-triage-suggestion="${escapeHtml(key)}">Gerar sugestão</button></div>`;
+  }
+  const categoryName = suggestion.categoryName || categories.find(c => c.id === suggestion.categoryId)?.name || 'Triagem manual';
+  const departmentName = suggestion.departmentName || departments.find(d => d.id === suggestion.departmentId)?.name || 'Não definido';
+  const confidence = suggestion.confidence ? `${Math.round(Number(suggestion.confidence) * 100)}%` : suggestion.confidenceLabel || 'Baixa';
+  const keywords = (suggestion.matchedKeywords || []).length ? suggestion.matchedKeywords.join(', ') : 'sem palavra-chave forte';
+  const summary = `
+    <div class="protocol-status-grid admin">
+      <div><span>Categoria sugerida</span><strong>${escapeHtml(categoryName)}</strong></div>
+      <div><span>Prioridade sugerida</span>${badgePriority(suggestion.priority)}</div>
+      <div><span>Setor sugerido</span><strong>${escapeHtml(departmentName)}</strong></div>
+      <div><span>SLA sugerido</span><strong>${escapeHtml(`${suggestion.slaHours || triageSlaHours(suggestion.priority)}h · ${fmtDate(suggestion.slaDueAt)}`)}</strong></div>
+      <div><span>Confiança</span><strong>${escapeHtml(`${suggestion.confidenceLabel || ''} ${confidence}`.trim())}</strong></div>
+      <div><span>Regras locais</span><strong>${escapeHtml(keywords)}</strong></div>
+    </div>
+    <p class="muted-text">Mensagem pública sugerida: ${escapeHtml(suggestion.publicMessage || 'Sem mensagem sugerida.')}</p>
+  `;
+  if (mode === 'edit') {
+    return `${summary}
+      <form class="form-grid" data-apply-triage-edits="${escapeHtml(key)}">
+        <div class="gov-field"><label>Categoria</label><select name="categoryId"><option value="">Manter atual</option>${categories.map(cat => `<option value="${escapeHtml(cat.id)}" ${suggestion.categoryId === cat.id ? 'selected' : ''}>${escapeHtml(cat.name)}</option>`).join('')}</select></div>
+        <div class="gov-field"><label>Setor</label><select name="departmentId"><option value="">Manter atual</option>${departments.map(dep => `<option value="${escapeHtml(dep.id)}" ${suggestion.departmentId === dep.id ? 'selected' : ''}>${escapeHtml(dep.name)}</option>`).join('')}</select></div>
+        <div class="gov-field"><label>Prioridade</label><select name="priority">${Object.entries(priorityLabels).map(([k,v]) => `<option value="${k}" ${suggestion.priority === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div class="gov-field full"><label>Mensagem pública</label><textarea name="publicMessage">${escapeHtml(suggestion.publicMessage || '')}</textarea></div>
+        <div class="full quick-actions"><button class="gov-button small primary" type="submit">Aplicar ajustes</button><button class="gov-button small ghost" type="button" data-ignore-triage-suggestion="${escapeHtml(key)}">Ignorar</button></div>
+      </form>`;
+  }
+  return `${summary}<div class="quick-actions"><button class="gov-button small primary" type="button" data-apply-triage-suggestion="${escapeHtml(key)}">Aplicar sugestão</button><button class="gov-button small" type="button" data-edit-triage-suggestion="${escapeHtml(key)}">Editar manualmente</button><button class="gov-button small ghost" type="button" data-ignore-triage-suggestion="${escapeHtml(key)}">Ignorar</button></div>`;
+}
+
 function renderOccurrenceModal(occ) {
   const departments = state.panelData?.departments || [];
   const users = (state.panelData?.users || []).filter(u => u.role !== 'CITIZEN');
@@ -1639,6 +1785,7 @@ function renderOccurrenceModal(occ) {
             <section><h3>Localização</h3><p>${escapeHtml([occ.address, occ.referencePoint, occ.neighborhood?.name].filter(Boolean).join(' · ') || 'Não informado')}</p><p><strong>Solicitante:</strong> ${escapeHtml(occ.citizen?.name || 'Não informado')} ${occ.citizen?.phone ? `· ${escapeHtml(occ.citizen.phone)}` : ''}</p></section>
           </div>
           <section class="detail-block"><h3>Descrição da ocorrência</h3><p>${escapeHtml(occ.description)}</p></section>
+          <section class="detail-block"><h3>Sugestão do sistema</h3>${renderTriageSuggestionPanel(occ)}</section>
           <section class="detail-block evidence-block"><div class="evidence-heading"><div><h3>Anexos e evidências</h3><p class="muted-text">Fotos, PDFs e documentos ligados à ocorrência. Cada item tem visibilidade e histórico operacional.</p></div><span class="evidence-count">${(occ.attachments || []).length} item(ns)</span></div>${renderAttachmentGallery(occ.attachments || [], { operational: true })}
             <form class="attachment-upload" data-upload-attachment="${escapeHtml(occ.id)}">
               <div class="gov-field"><label>Adicionar anexo</label><input type="file" name="attachment" accept="image/png,image/jpeg,image/webp,application/pdf" /><span class="form-help">Preview e compressão automática para imagens quando possível.</span></div>
@@ -1730,6 +1877,70 @@ function bindModalActions() {
       toast(error.message);
     }
   });
+
+  document.querySelectorAll('[data-generate-triage-suggestion]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.generateTriageSuggestion;
+    const occ = state.modalOccurrence;
+    try {
+      const result = await request('/api/triage/suggest', { method: 'POST', body: JSON.stringify({ cityId: occ.cityId, title: occ.title, description: occ.description, address: occ.address, referencePoint: occ.referencePoint }) });
+      state.triageSuggestions[id] = result.suggestion;
+      state.triageSuggestionModes[id] = 'view';
+      toast('Sugestão local gerada.');
+      await render();
+    } catch (error) {
+      toast(error.message || 'Não foi possível gerar a sugestão.');
+    }
+  }));
+
+  document.querySelectorAll('[data-apply-triage-suggestion]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.applyTriageSuggestion;
+    const suggestion = state.triageSuggestions[id];
+    if (!suggestion) return toast('Gere uma sugestão antes de aplicar.');
+    try {
+      await request(`/api/occurrences/${encodeURIComponent(id)}/triage-suggestion`, { method: 'PATCH', body: JSON.stringify({ suggestion }) });
+      delete state.triageSuggestions[id];
+      delete state.triageSuggestionModes[id];
+      state.panelData = null;
+      const refreshed = await request(`/api/occurrences/${encodeURIComponent(id)}`);
+      state.modalOccurrence = refreshed.occurrence;
+      toast('Sugestão aplicada à ocorrência.');
+      await render();
+    } catch (error) {
+      toast(error.message || 'Não foi possível aplicar a sugestão.');
+    }
+  }));
+
+  document.querySelectorAll('[data-edit-triage-suggestion]').forEach(button => button.addEventListener('click', async () => {
+    state.triageSuggestionModes[button.dataset.editTriageSuggestion] = 'edit';
+    await render();
+  }));
+
+  document.querySelectorAll('[data-ignore-triage-suggestion]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.ignoreTriageSuggestion;
+    delete state.triageSuggestions[id];
+    delete state.triageSuggestionModes[id];
+    toast('Sugestão ignorada.');
+    await render();
+  }));
+
+  document.querySelectorAll('[data-apply-triage-edits]').forEach(editForm => editForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const id = editForm.dataset.applyTriageEdits;
+    const suggestion = state.triageSuggestions[id] || {};
+    const data = Object.fromEntries(new FormData(editForm).entries());
+    try {
+      await request(`/api/occurrences/${encodeURIComponent(id)}/triage-suggestion`, { method: 'PATCH', body: JSON.stringify({ ...data, suggestion }) });
+      delete state.triageSuggestions[id];
+      delete state.triageSuggestionModes[id];
+      state.panelData = null;
+      const refreshed = await request(`/api/occurrences/${encodeURIComponent(id)}`);
+      state.modalOccurrence = refreshed.occurrence;
+      toast('Ajustes de triagem aplicados.');
+      await render();
+    } catch (error) {
+      toast(error.message || 'Não foi possível aplicar os ajustes.');
+    }
+  }));
 
   const duplicateForm = document.querySelector('[data-duplicate-occurrence]');
   if (duplicateForm) duplicateForm.addEventListener('submit', async (event) => {

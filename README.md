@@ -122,7 +122,7 @@ Estrutura para zona rural, estradas, pontes, acessos, comunidades afastadas e im
 
 ## Status do desenvolvimento
 
-A versão atual está na **Fase 2.8**, com evidências operacionais, WhatsApp Cloud API, mídia recebida pelo webhook e vínculo automático de anexos a protocolos.
+A versão atual está na **Fase 2.9**, com evidências operacionais, WhatsApp Cloud API, mídia recebida pelo webhook, vínculo automático de anexos a protocolos e triagem inteligente por regras locais.
 
 ### <img src="./docs/assets/svg/cidadeos-bullet-dot.svg" width="14" alt="" /> Já consolidado
 
@@ -135,6 +135,7 @@ painel interno
 dashboard operacional
 status e prioridade
 triagem e SLA
+triagem por regras locais com confirmação do agente
 alertas oficiais
 transparência pública
 api serverless para vercel
@@ -168,10 +169,11 @@ A próxima janela mais provável concentra:
 - anexos reais
 - WhatsApp real
 - refinamento do painel
+- classificação assistida por IA preservando decisão humana
 - reforço de autenticação
 - preparação para operação multi-cidade
 
-A estimativa visual acima resume a leitura atual: **aproximadamente 78% do núcleo do produto está consolidado**, com uma **janela de 15 a 30 dias** para uma nova rodada forte de avanço, considerando ritmo contínuo de desenvolvimento.
+A estimativa visual acima resume a leitura atual: **aproximadamente 80% do núcleo do produto está consolidado**, com uma **janela de 15 a 30 dias** para uma nova rodada forte de avanço, considerando ritmo contínuo de desenvolvimento.
 
 <div align="center">
   <img src="./docs/assets/svg/cidadeos-divider.svg" alt="Divisória" width="100%" />

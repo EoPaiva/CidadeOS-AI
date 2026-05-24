@@ -162,6 +162,93 @@ function computeSlaDue(priority) {
   return date.toISOString();
 }
 
+function triageSlaHours(priority) {
+  return priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168;
+}
+
+function normalizeRuleText(value = '') {
+  return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const localTriageRules = [
+  { key: 'defesa_civil', priority: 'CRITICA', keywords: ['alagamento', 'alag', 'enchente', 'arvore', 'queda de arvore', 'deslizamento', 'area de risco', 'risco imediato', 'desabamento'], publicMessage: 'Solicitação de risco recebida para avaliação prioritária da equipe responsável.', departmentHints: ['defesa', 'risco'] },
+  { key: 'saude_publica', priority: 'ALTA', keywords: ['dengue', 'mosquito', 'agua parada', 'foco', 'terreno abandonado', 'terreno'], publicMessage: 'Solicitação relacionada à saúde pública recebida para vistoria da equipe responsável.', departmentHints: ['vigilancia', 'saude', 'sanitaria'] },
+  { key: 'agua_saneamento', priority: 'ALTA', keywords: ['vazamento', 'falta d agua', 'falta dagua', 'falta de agua', 'sem agua', 'esgoto', 'baixa pressao'], publicMessage: 'Solicitação de água ou saneamento recebida para encaminhamento técnico.', departmentHints: ['saneamento', 'agua', 'esgoto'] },
+  { key: 'assistencia_social', priority: 'ALTA', keywords: ['idoso', 'idosa', 'vulneravel', 'assistencia', 'morador de rua', 'visita', 'ajuda'], publicMessage: 'Solicitação de assistência social recebida para acolhimento e triagem da equipe responsável.', departmentHints: ['social', 'assistencia'] },
+  { key: 'zona_rural', priority: 'MEDIA', keywords: ['estrada rural', 'ponte', 'sitio', 'zona rural', 'acesso bloqueado', 'roca', 'rural'], publicMessage: 'Solicitação da zona rural recebida para avaliação do setor territorial responsável.', departmentHints: ['rural'] },
+  { key: 'urbano', priority: 'MEDIA', keywords: ['buraco', 'lampada', 'poste', 'iluminacao', 'lixo', 'mato', 'praca', 'calcada'], publicMessage: 'Solicitação urbana recebida para análise e encaminhamento do setor responsável.', departmentHints: ['obras', 'servicos', 'urbano'] }
+];
+
+const categoryRuleHints = {
+  defesa_civil: ['defesa_civil', 'defesa civil', 'defesa', 'clima'],
+  saude_publica: ['saude_publica', 'saude publica', 'saude', 'dengue', 'vigilancia'],
+  agua_saneamento: ['agua_saneamento', 'agua e saneamento', 'saneamento', 'agua'],
+  assistencia_social: ['assistencia_social', 'assistencia social', 'social'],
+  zona_rural: ['zona_rural', 'zona rural', 'rural'],
+  urbano: ['urbano', 'zeladoria', 'obras']
+};
+
+function localRuleMatches(text, keywords) {
+  return keywords.filter((keyword) => text.includes(normalizeRuleText(keyword)));
+}
+
+function pickRuleCategory(categories = [], key = 'urbano', cityId = '') {
+  const hints = categoryRuleHints[key] || [key];
+  return categories.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.key || ''} ${item.id || ''} ${item.name || ''}`).includes(normalizeRuleText(hint)))) || categories.find((item) => !cityId || !item.cityId || item.cityId === cityId) || categories[0] || null;
+}
+
+function pickRuleDepartment(db, category = null, rule = {}, cityId = '') {
+  const fromCategory = findDefaultDepartment(db, category?.id);
+  if (fromCategory) return fromCategory;
+  const hints = rule.departmentHints || [];
+  return db.departments.find((item) => (!cityId || !item.cityId || item.cityId === cityId) && hints.some((hint) => normalizeRuleText(`${item.name || ''} ${item.description || ''}`).includes(normalizeRuleText(hint)))) || db.departments.find((item) => !cityId || !item.cityId || item.cityId === cityId) || db.departments[0] || null;
+}
+
+function pickRuleSubcategory(subcategories = [], categoryId = '', matchedKeywords = []) {
+  const list = subcategories.filter((item) => item.categoryId === categoryId);
+  const normalizedKeywords = matchedKeywords.map(normalizeRuleText);
+  return list.find((item) => normalizedKeywords.some((keyword) => normalizeRuleText(`${item.key || ''} ${item.name || ''}`).includes(keyword) || keyword.includes(normalizeRuleText(item.name || '')))) || list[0] || null;
+}
+
+function buildLocalTriageSuggestion(db, { text = '', cityId = '' } = {}) {
+  const normalized = normalizeRuleText(text);
+  const priorityWeight = { BAIXA: 1, MEDIA: 2, ALTA: 3, CRITICA: 4 };
+  let selected = null;
+  for (const rule of localTriageRules) {
+    const matched = localRuleMatches(normalized, rule.keywords);
+    if (!matched.length) continue;
+    if (!selected || matched.length > selected.matched.length || priorityWeight[rule.priority] > priorityWeight[selected.rule.priority]) selected = { rule, matched };
+  }
+  const fallbackRule = localTriageRules.find((item) => item.key === 'urbano');
+  const rule = selected?.rule || fallbackRule;
+  const matchedKeywords = [...new Set(selected?.matched || [])];
+  let priority = rule.priority;
+  if (rule.key === 'zona_rural' && /(bloquead|interdit|risco|queda|ponte.*cai)/.test(normalized)) priority = 'ALTA';
+  if (rule.key === 'urbano' && /(risco|acidente|perigo|muito grande|poste caindo)/.test(normalized)) priority = 'ALTA';
+  const category = pickRuleCategory(db.categories, rule.key, cityId);
+  const department = pickRuleDepartment(db, category, rule, cityId);
+  const subcategory = pickRuleSubcategory(db.subcategories, category?.id, matchedKeywords);
+  const confidence = matchedKeywords.length ? Math.min(0.95, 0.55 + (matchedKeywords.length * 0.1) + (priority === 'CRITICA' ? 0.08 : 0)) : 0.35;
+  return {
+    source: 'rules_local_v1',
+    categoryId: category?.id || null,
+    categoryName: category?.name || 'Triagem manual',
+    categoryKey: rule.key,
+    subcategoryId: subcategory?.id || null,
+    subcategoryName: subcategory?.name || '',
+    departmentId: department?.id || category?.defaultDepartmentId || null,
+    departmentName: department?.name || '',
+    priority,
+    publicMessage: rule.publicMessage,
+    slaDueAt: computeSlaDue(priority),
+    slaHours: triageSlaHours(priority),
+    confidence,
+    confidenceLabel: confidence >= 0.75 ? 'Alta' : confidence >= 0.5 ? 'Média' : 'Baixa',
+    matchedKeywords,
+    reason: matchedKeywords.length ? `Regra local por palavra-chave: ${matchedKeywords.join(', ')}.` : 'Sem palavra-chave forte; sugestão inicial conservadora.'
+  };
+}
+
 
 function onlyDigits(value = '') {
   return String(value || '').replace(/\D/g, '');
@@ -227,19 +314,8 @@ function whatsappCompleteness(channel) {
 
 
 function inferWhatsAppClassification(db, text = '', cityId = '') {
-  const source = String(text || '').toLowerCase();
-  const match = (words) => words.some((word) => source.includes(word));
-  let categoryId = 'cat_urbano';
-  let priority = 'MEDIA';
-  if (match(['dengue','mosquito','água parada','agua parada','terreno abandonado','foco'])) { categoryId = 'cat_saude_publica'; priority = 'ALTA'; }
-  else if (match(['alag','enchente','árvore caiu','arvore caiu','queda de árvore','queda de arvore','deslizamento','risco imediato','desabamento'])) { categoryId = 'cat_defesa_civil'; priority = 'CRITICA'; }
-  else if (match(['vazamento','falta d’água','falta d\'água','falta dagua','sem água','sem agua','esgoto','baixa pressão','baixa pressao'])) { categoryId = 'cat_agua_saneamento'; priority = 'ALTA'; }
-  else if (match(['idoso','idosa','vulnerável','vulneravel','visita','assistência','assistencia','morador de rua'])) { categoryId = 'cat_assistencia_social'; priority = 'ALTA'; }
-  else if (match(['estrada rural','ponte','sítio','sitio','zona rural','acesso bloqueado','roça','rural'])) { categoryId = 'cat_zona_rural'; priority = 'MEDIA'; }
-  else if (match(['buraco','lâmpada','lampada','iluminação','iluminacao','lixo','mato','praça','praca','calçada','calcada'])) { categoryId = 'cat_urbano'; priority = match(['risco','acidente','muito grande','perigo']) ? 'ALTA' : 'MEDIA'; }
-  const category = db.categories.find((item) => item.id === categoryId) || db.categories.find((item) => item.cityId === cityId || !item.cityId) || db.categories[0];
-  const department = findDefaultDepartment(db, category?.id) || db.departments.find((dep) => dep.cityId === cityId);
-  return { categoryId: category?.id || null, departmentId: department?.id || null, priority, title: category ? `Solicitação via WhatsApp — ${category.name}` : 'Solicitação via WhatsApp' };
+  const suggestion = buildLocalTriageSuggestion(db, { text, cityId });
+  return { ...suggestion, title: suggestion.categoryName ? `Solicitação via WhatsApp — ${suggestion.categoryName}` : 'Solicitação via WhatsApp' };
 }
 
 function publicWhatsAppMessage(db, message) {
@@ -583,6 +659,15 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 201, { ok: true, [resource.slice(0, -1)]: item });
   }
 
+  if (pathname === '/api/triage/suggest' && req.method === 'POST') {
+    const body = await parseJsonBody(req, MAX_JSON_BYTES);
+    const db = readDb();
+    const cityId = user.role === 'SUPER_ADMIN' ? (body.cityId || db.cities[0]?.id) : user.cityId;
+    if (cityId && !userCanAccessCity(user, cityId)) return sendError(res, 403, 'Acesso restrito para esta cidade.');
+    const text = [body.text, body.title, body.description, body.address, body.referencePoint, body.messageBody].filter(Boolean).join(' ');
+    return sendJson(res, 200, { ok: true, suggestion: buildLocalTriageSuggestion(db, { text, cityId }) });
+  }
+
   if (pathname === '/api/occurrences' && req.method === 'GET') {
     const db = readDb();
     const params = new url.URL(req.url, `http://${req.headers.host}`).searchParams;
@@ -686,6 +771,41 @@ async function handleApi(req, res, pathname) {
       occurrence.slaDueAt = computeSlaDue(priority);
       occurrence.updatedAt = nowIso();
       addAudit(db, { cityId: occurrence.cityId, userId: user.id, action: 'OCCURRENCE_PRIORITY_CHANGED', entityType: 'Occurrence', entityId: occurrence.id, metadata: { oldPriority, priority } });
+      return serializeOccurrence(db, occurrence);
+    });
+    return sendJson(res, 200, { ok: true, occurrence: updated });
+  }
+
+  const occurrenceTriageSuggestionMatch = pathname.match(/^\/api\/occurrences\/([^/]+)\/triage-suggestion$/);
+  if (occurrenceTriageSuggestionMatch && req.method === 'PATCH') {
+    if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER, ROLES.AGENT, ROLES.HEALTH_AGENT])) return;
+    const id = occurrenceTriageSuggestionMatch[1];
+    const body = await parseJsonBody(req, MAX_JSON_BYTES);
+    const updated = transaction((db) => {
+      const occurrence = db.occurrences.find((item) => item.id === id || item.protocol === id);
+      if (!occurrence) throw Object.assign(new Error('Ocorrência não encontrada.'), { status: 404 });
+      if (!userCanAccessCity(user, occurrence.cityId)) throw Object.assign(new Error('Acesso restrito para esta cidade.'), { status: 403 });
+      const suggestion = body.suggestion || {};
+      const pickSuggested = (key) => Object.prototype.hasOwnProperty.call(body, key) ? body[key] : suggestion[key];
+      const category = db.categories.find((item) => item.id === pickSuggested('categoryId') && item.active) || null;
+      const subcategory = db.subcategories.find((item) => item.id === pickSuggested('subcategoryId') && (!category || item.categoryId === category.id) && item.active) || null;
+      const department = db.departments.find((item) => item.id === pickSuggested('departmentId') && item.cityId === occurrence.cityId) || null;
+      const priority = normalizeText(pickSuggested('priority')).toUpperCase();
+      const oldSnapshot = { categoryId: occurrence.categoryId, subcategoryId: occurrence.subcategoryId, departmentId: occurrence.departmentId, priority: occurrence.priority };
+      if (category) occurrence.categoryId = category.id;
+      if (subcategory) occurrence.subcategoryId = subcategory.id;
+      if (department) occurrence.departmentId = department.id;
+      if (['BAIXA', 'MEDIA', 'ALTA', 'CRITICA'].includes(priority)) {
+        occurrence.priority = priority;
+        occurrence.slaDueAt = computeSlaDue(priority);
+      }
+      occurrence.publicMessage = normalizeText(pickSuggested('publicMessage')) || occurrence.publicMessage;
+      occurrence.updatedAt = nowIso();
+      db.statusHistory.push({
+        id: uuid('hist'), occurrenceId: occurrence.id, changedBy: user.id, oldStatus: occurrence.status, newStatus: occurrence.status,
+        comment: 'Sugestão local de triagem aplicada após confirmação.', publicMessage: occurrence.publicMessage, createdAt: nowIso()
+      });
+      addAudit(db, { cityId: occurrence.cityId, userId: user.id, action: 'LOCAL_TRIAGE_SUGGESTION_APPLIED', entityType: 'Occurrence', entityId: occurrence.id, metadata: { before: oldSnapshot, after: { categoryId: occurrence.categoryId, subcategoryId: occurrence.subcategoryId, departmentId: occurrence.departmentId, priority: occurrence.priority }, confidence: suggestion.confidence, source: suggestion.source } });
       return serializeOccurrence(db, occurrence);
     });
     return sendJson(res, 200, { ok: true, occurrence: updated });
@@ -985,6 +1105,7 @@ async function handleApi(req, res, pathname) {
             const payloadJson = {
               ...message,
               source: 'meta_webhook_local',
+              localTriageSuggestion: classification,
               mediaId: media?.id || '',
               mediaMimeType: media?.mime_type || '',
               mediaSha256: media?.sha256 || '',
@@ -1094,7 +1215,7 @@ async function handleApi(req, res, pathname) {
         status: 'RECEBIDO', address: normalizeText(body.address), referencePoint: normalizeText(body.referencePoint),
         latitude: null, longitude: null, publicVisibility: true, duplicateOfId: null,
         slaDueAt: computeSlaDue(normalizeText(body.priority || classification.priority).toUpperCase()),
-        origin: 'WHATSAPP', whatsappMessageId: message.id, publicMessage: 'Solicitação recebida pelo WhatsApp oficial e registrada para triagem da equipe responsável.',
+        origin: 'WHATSAPP', whatsappMessageId: message.id, publicMessage: classification.publicMessage || 'Solicitação recebida pelo WhatsApp oficial e registrada para triagem da equipe responsável.',
         resolvedAt: null, createdAt: nowIso(), updatedAt: nowIso()
       };
       db.occurrences.push(occurrence);
@@ -1124,7 +1245,7 @@ async function handleApi(req, res, pathname) {
       const channel = db.whatsappChannels.find((item) => item.cityId === cityId) || null;
       const text = normalizeText(body.messageBody) || 'Mensagem de teste recebida pelo WhatsApp oficial.';
       const classification = inferWhatsAppClassification(db, text, cityId);
-      const payloadJson = { simulated: true };
+      const payloadJson = { simulated: true, localTriageSuggestion: classification };
       if (body.mediaId || body.mediaStoragePath) {
         payloadJson.mediaId = body.mediaId || uuid('wamedia');
         payloadJson.mediaMimeType = body.mediaMimeType || 'image/jpeg';
