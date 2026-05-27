@@ -109,3 +109,17 @@ A Fase 3.1 reutiliza campos e tabelas ja previstos:
 - `audit_logs` para rastreabilidade da acao de vinculo ou arquivamento.
 
 Nao ha mesclagem automatica. O sistema apenas sugere candidatos por categoria, bairro, endereco e similaridade textual; o vinculo depende de confirmacao humana no painel.
+
+## Fase 3.2 - Mapa e geolocalizacao
+
+Sem SQL obrigatorio novo.
+
+A Fase 3.2 reutiliza campos e tabelas ja previstos:
+
+- `occurrences.latitude` e `occurrences.longitude` para coordenadas opcionais;
+- `occurrences.address` e `occurrences.reference_point` para ponto de referencia e local aproximado;
+- `neighborhoods` para filtro por bairro/regiao e calor territorial;
+- `occurrences.priority`, `occurrences.status` e `occurrences.sla_due_at` para destacar pontos criticos e atrasados;
+- `audit_logs` para registrar a precisao usada na abertura publica.
+
+Regra de privacidade aplicada na aplicacao: coordenada precisa so e salva quando o morador/operador marcar consentimento explicito. Sem consentimento, latitude e longitude sao arredondadas para precisao aproximada antes do armazenamento. A consulta publica nao expõe latitude/longitude e reduz numeros de endereco; detalhes sensiveis ficam restritos ao painel interno.

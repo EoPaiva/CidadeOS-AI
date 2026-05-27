@@ -122,7 +122,7 @@ Estrutura para zona rural, estradas, pontes, acessos, comunidades afastadas e im
 
 ## Status do desenvolvimento
 
-A versão atual está na **Fase 3.1**, com evidências operacionais, WhatsApp Cloud API, mídia recebida pelo webhook, vínculo automático de anexos a protocolos, IA assistida opcional para triagem e fluxo confirmado de duplicidade e agrupamento.
+A versão atual está na **Fase 3.2**, com evidências operacionais, WhatsApp Cloud API, mídia recebida pelo webhook, vínculo automático de anexos a protocolos, IA assistida opcional para triagem, duplicidade assistida e mapa operacional com geolocalização opcional.
 
 ### <img src="./docs/assets/svg/cidadeos-bullet-dot.svg" width="14" alt="" /> Já consolidado
 
@@ -138,6 +138,8 @@ triagem e SLA
 triagem por regras locais com confirmação do agente
 IA assistida opcional para resumo, risco e resposta sugerida
 duplicidade assistida com candidatos, vínculo confirmado e arquivamento opcional
+mapa operacional interno com filtro por bairro/região, pontos críticos e calor territorial
+geolocalização opcional com privacidade por padrão
 alertas oficiais
 transparência pública
 api serverless para vercel
@@ -153,7 +155,6 @@ documentação técnica e identidade visual
 envio real pela cloud api do whatsapp em operações conectadas
 criptografia reforçada por cidade
 autenticação robusta de produção
-mapa e geolocalização
 analiticos preditivos e mapa de recorrencia
 multi-tenant comercial
 ```

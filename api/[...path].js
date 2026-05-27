@@ -72,6 +72,33 @@ async function supa(path, options = {}) {
   return data;
 }
 
+function toOptionalCoordinate(value, type = 'lat') {
+  const raw = String(value ?? '').replace(',', '.').trim();
+  if (!raw) return null;
+  const number = Number(raw);
+  const limit = type === 'lng' ? 180 : 90;
+  return Number.isFinite(number) && Math.abs(number) <= limit ? number : null;
+}
+
+function normalizeLocationPayload(input = {}) {
+  const latitude = toOptionalCoordinate(input.latitude, 'lat');
+  const longitude = toOptionalCoordinate(input.longitude, 'lng');
+  const hasPair = latitude !== null && longitude !== null;
+  const wantsPrecise = input.locationPrecision === 'EXATA_CONSENTIDA';
+  const consent = input.locationConsent === true || ['true', 'on', '1', 'yes'].includes(String(input.locationConsent || '').toLowerCase());
+  if (!hasPair) return { latitude: null, longitude: null, locationPrecision: 'APROXIMADA' };
+  const precise = wantsPrecise && consent;
+  return {
+    latitude: Number(latitude.toFixed(precise ? 6 : 3)),
+    longitude: Number(longitude.toFixed(precise ? 6 : 3)),
+    locationPrecision: precise ? 'EXATA_CONSENTIDA' : 'APROXIMADA'
+  };
+}
+
+function safePublicAddress(value = '') {
+  return String(value || '').replace(/\b\d+[a-zA-Z]?\b/g, '').replace(/\s*,\s*/g, ', ').replace(/,\s*$/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function safeFileName(name = 'anexo') {
   return String(name || 'anexo').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').slice(0, 80) || 'anexo';
 }
@@ -208,7 +235,7 @@ function publicOccurrence(occ) {
   return {
     protocol: occ.protocol, title: occ.title, description: occ.description,
     category: occ.category?.name || '', subcategory: occ.subcategory?.name || '', neighborhood: occ.neighborhood?.name || '', department: occ.department?.name || '',
-    priority: occ.priority, status: occ.status, address: occ.address, referencePoint: occ.referencePoint, publicMessage: occ.publicMessage,
+    priority: occ.priority, status: occ.status, address: safePublicAddress(occ.address), referencePoint: occ.referencePoint, publicMessage: occ.publicMessage,
     slaDueAt: occ.slaDueAt, createdAt: occ.createdAt, updatedAt: occ.updatedAt, resolvedAt: occ.resolvedAt,
     attachments: (occ.attachments || []).filter(a => a.visibility === 'PUBLICA' || a.visibility === 'PUBLIC').map(a => ({ id: a.id, fileName: a.fileName, fileType: a.fileType, fileUrl: a.fileUrl, sizeBytes: a.sizeBytes, source: a.source || 'registro', createdAt: a.createdAt })),
     publicHistory: (occ.history || []).filter(h => h.publicMessage).map(h => ({ status: h.newStatus, publicMessage: h.publicMessage, createdAt: h.createdAt }))
@@ -1168,7 +1195,8 @@ export default async function handler(req, res) {
       const category = catRows[0] || (await supa('occurrence_categories?active=eq.true&select=*&limit=1'))[0];
       const sub = body.subcategoryId ? (await supa(`occurrence_subcategories?id=eq.${encodeURIComponent(body.subcategoryId)}&select=*`))[0] : null;
       const priority = dbPriority(body.priority || priorityFromDb[sub?.default_priority] || 'MEDIA');
-      const insert = [{ city_id: cityId, title: body.title || 'Ocorrência registrada pelo morador', description: body.description || '', category_id: category?.id || null, subcategory_id: sub?.id || null, neighborhood_id: body.neighborhoodId || null, department_id: category?.default_department_id || null, citizen_name: body.citizenName || 'Morador', citizen_phone: body.citizenPhone || '', citizen_email: body.citizenEmail || '', priority, status: 'recebido', origin: 'portal', address: body.address || '', reference_point: body.referencePoint || '', public_visibility: true, sla_due_at: computeSla(priorityFromDb[priority] || 'MEDIA'), public_message: 'Ocorrência recebida pelo Portal de Atendimento ao Cidadão.' }];
+      const location = normalizeLocationPayload(body);
+      const insert = [{ city_id: cityId, title: body.title || 'Ocorrência registrada pelo morador', description: body.description || '', category_id: category?.id || null, subcategory_id: sub?.id || null, neighborhood_id: body.neighborhoodId || null, department_id: category?.default_department_id || null, citizen_name: body.citizenName || 'Morador', citizen_phone: body.citizenPhone || '', citizen_email: body.citizenEmail || '', priority, status: 'recebido', origin: 'portal', address: body.address || '', reference_point: body.referencePoint || '', latitude: location.latitude, longitude: location.longitude, public_visibility: true, sla_due_at: computeSla(priorityFromDb[priority] || 'MEDIA'), public_message: 'Ocorrência recebida pelo Portal de Atendimento ao Cidadão.' }];
       const rows = await supa('occurrences', { method: 'POST', body: JSON.stringify(insert) });
       const occ = rows[0];
       await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{ occurrence_id: occ.id, city_id: occ.city_id, old_status: null, new_status: 'recebido', public_message: occ.public_message, visibility: 'publica' }]) });
@@ -1181,7 +1209,7 @@ export default async function handler(req, res) {
           throw attachmentError;
         }
       }
-      await audit(occ.city_id, null, 'PUBLIC_OCCURRENCE_CREATED', 'Occurrence', occ.id, { origin: 'portal' });
+      await audit(occ.city_id, null, 'PUBLIC_OCCURRENCE_CREATED', 'Occurrence', occ.id, { origin: 'portal', locationPrecision: location.locationPrecision });
       const [serialized] = await serializeRows([occ], occ.city_id);
       return ok(res, { occurrence: publicOccurrence(serialized) });
     }
