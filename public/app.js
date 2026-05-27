@@ -17,6 +17,7 @@ const state = {
   modalOccurrence: null,
   triageSuggestions: {},
   triageSuggestionModes: {},
+  duplicateInsights: {},
   lastProtocol: sessionStorage.getItem('cidadeos_last_protocol') || ''
 };
 
@@ -388,7 +389,7 @@ function buildRiskProfile(priority = 'MEDIA', text = '') {
   return { riskLevel, riskFactors: factors.length ? factors : ['sem fator critico explicito no relato'] };
 }
 
-function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '' } = {}) {
+function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '', minScore = 0.42, limit = 3 } = {}) {
   const activeStatuses = new Set(['RECEBIDO','EM_ANALISE','ENCAMINHADO','EM_EXECUCAO','AGUARDANDO_TERCEIRO']);
   const normalizedAddress = normalizeRuleText([address, referencePoint].filter(Boolean).join(' '));
   return occurrences
@@ -406,13 +407,61 @@ function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId =
         protocol: item.protocol,
         title: trimAssistiveText(item.title || item.description || 'Ocorrencia similar', 90),
         status: item.status,
+        priority: item.priority,
+        categoryId: item.categoryId,
+        neighborhoodId: item.neighborhoodId,
+        duplicateOfId: item.duplicateOfId || null,
+        createdAt: item.createdAt,
         score: Number(Math.min(score, 0.99).toFixed(2)),
         reason: neighborhoodId && item.neighborhoodId === neighborhoodId ? 'Mesmo bairro e relato semelhante.' : 'Relato semelhante encontrado.'
       };
     })
-    .filter((item) => item.score >= 0.42)
+    .filter((item) => item.score >= minScore)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+    .slice(0, limit);
+}
+
+function duplicateOccurrenceReference(db, occurrence) {
+  if (!occurrence) return null;
+  const category = db.categories.find((item) => item.id === occurrence.categoryId) || null;
+  const neighborhood = db.neighborhoods.find((item) => item.id === occurrence.neighborhoodId) || null;
+  return {
+    id: occurrence.id,
+    protocol: occurrence.protocol,
+    title: trimAssistiveText(occurrence.title || occurrence.description || 'Ocorrencia', 120),
+    status: occurrence.status,
+    priority: occurrence.priority,
+    categoryId: occurrence.categoryId,
+    categoryName: category?.name || '',
+    neighborhoodId: occurrence.neighborhoodId,
+    neighborhoodName: neighborhood?.name || '',
+    duplicateOfId: occurrence.duplicateOfId || null,
+    createdAt: occurrence.createdAt
+  };
+}
+
+function duplicateCandidateContext(db, occurrence) {
+  const text = [occurrence.title, occurrence.description, occurrence.address, occurrence.referencePoint].filter(Boolean).join(' ');
+  const candidates = findDuplicateCandidates(db.occurrences, {
+    cityId: occurrence.cityId,
+    occurrenceId: occurrence.id,
+    text,
+    categoryId: occurrence.categoryId,
+    neighborhoodId: occurrence.neighborhoodId,
+    address: occurrence.address,
+    referencePoint: occurrence.referencePoint,
+    minScore: 0.32,
+    limit: 6
+  }).map((candidate) => {
+    const full = db.occurrences.find((item) => item.id === candidate.id);
+    const reference = duplicateOccurrenceReference(db, full);
+    return { ...candidate, ...reference, score: candidate.score, reason: candidate.reason, linkedDuplicates: db.occurrences.filter((item) => item.duplicateOfId === candidate.id).length };
+  });
+  return {
+    candidates,
+    duplicateOf: duplicateOccurrenceReference(db, db.occurrences.find((item) => item.id === occurrence.duplicateOfId)),
+    duplicateChildren: db.occurrences.filter((item) => item.duplicateOfId === occurrence.id).map((item) => duplicateOccurrenceReference(db, item))
+  };
 }
 
 function buildAssistiveTriageFallback({ text = '', title = '', description = '', address = '', referencePoint = '', messageBody = '', cityId = '', occurrenceId = '', protocol = '', neighborhoodId = '', categories = [], departments = [], subcategories = [], neighborhoods = [], occurrences = [], computeSla = demoComputeSla } = {}) {
@@ -604,6 +653,12 @@ async function demoRequest(path, options = {}) {
     if (!occ) throw new Error('Ocorrência não encontrada.');
     return { ok: true, occurrence: demoSerializeOccurrence(db, occ), previewMode: true };
   }
+  const occDuplicateCandidates = pathname.match(/^\/api\/occurrences\/([^/]+)\/duplicate-candidates$/);
+  if (occDuplicateCandidates && method === 'GET') {
+    const occ = db.occurrences.find(o => o.id === occDuplicateCandidates[1] || o.protocol === occDuplicateCandidates[1]);
+    if (!occ) throw new Error('Ocorrencia nao encontrada.');
+    return { ok: true, ...duplicateCandidateContext(db, occ), previewMode: true };
+  }
   if (pathname === '/api/triage/suggest' && method === 'POST') {
     const text = [body.text, body.title, body.description, body.address, body.referencePoint, body.messageBody].filter(Boolean).join(' ');
     const suggestion = buildAssistiveTriageFallback({ ...body, text, categories: db.categories, departments: db.departments, subcategories: db.subcategories, neighborhoods: db.neighborhoods, occurrences: db.occurrences, cityId: body.cityId || currentUser?.cityId || db.cities[0]?.id });
@@ -643,7 +698,24 @@ async function demoRequest(path, options = {}) {
   const occAssign = pathname.match(/^\/api\/occurrences\/([^/]+)\/assign$/);
   if (occAssign && method === 'PATCH') { const occ = db.occurrences.find(o => o.id === occAssign[1]); if (occ) { occ.departmentId = body.departmentId || occ.departmentId; occ.assignedAgentId = body.assignedAgentId || occ.assignedAgentId; occ.updatedAt = demoNowIso(); } return save({ ok: true, occurrence: occ ? demoSerializeOccurrence(db, occ) : null, previewMode: true }); }
   const occDup = pathname.match(/^\/api\/occurrences\/([^/]+)\/mark-duplicate$/);
-  if (occDup && method === 'PATCH') { const occ = db.occurrences.find(o => o.id === occDup[1]); const main = db.occurrences.find(o => o.protocol === body.protocol); if (occ && main) { occ.status = 'DUPLICADO'; occ.duplicateOfId = main.id; occ.publicMessage = `Ocorrência duplicada do protocolo ${main.protocol}.`; } return save({ ok: true, occurrence: occ ? demoSerializeOccurrence(db, occ) : null, previewMode: true }); }
+  if (occDup && method === 'PATCH') {
+    const occ = db.occurrences.find(o => o.id === occDup[1] || o.protocol === occDup[1]);
+    const target = String(body.duplicateOfId || body.candidateId || body.protocol || '').trim();
+    const main = db.occurrences.find(o => o.id === target || o.protocol === target);
+    if (!occ || !main) throw new Error('Ocorrencia original ou principal nao encontrada.');
+    if (occ.id === main.id) throw new Error('Uma ocorrencia nao pode ser duplicada dela mesma.');
+    if (occ.cityId !== main.cityId || main.duplicateOfId === occ.id) throw new Error('Vinculo de duplicidade recusado.');
+    const oldStatus = occ.status;
+    const archiveDuplicate = Boolean(body.archiveDuplicate);
+    occ.status = archiveDuplicate ? 'ARQUIVADO' : 'DUPLICADO';
+    occ.duplicateOfId = main.id;
+    occ.publicMessage = `Esta ocorrencia foi vinculada ao protocolo principal ${main.protocol}.`;
+    occ.updatedAt = demoNowIso();
+    db.statusHistory.push({ id: demoUuid('hist'), occurrenceId: occ.id, changedBy: currentUser?.id, oldStatus, newStatus: occ.status, comment: `${archiveDuplicate ? 'Ocorrencia arquivada como duplicada' : 'Ocorrencia marcada como duplicada'} do protocolo ${main.protocol}.`, publicMessage: occ.publicMessage, createdAt: demoNowIso() });
+    db.comments.push({ id: demoUuid('com'), occurrenceId: main.id, userId: currentUser?.id, comment: `Ocorrencia ${occ.protocol} agrupada como duplicada. ${trimAssistiveText(occ.title || occ.description || '', 140)}`, visibility: 'INTERNAL', createdAt: demoNowIso() });
+    db.auditLogs.push({ id: demoUuid('audit'), cityId: occ.cityId, userId: currentUser?.id, action: archiveDuplicate ? 'OCCURRENCE_ARCHIVED_AS_DUPLICATE' : 'OCCURRENCE_MARKED_DUPLICATE', entityType: 'Occurrence', entityId: occ.id, metadata: { duplicateOfId: main.id, parentProtocol: main.protocol, archiveDuplicate, previousStatus: oldStatus }, createdAt: demoNowIso() });
+    return save({ ok: true, occurrence: demoSerializeOccurrence(db, occ), previewMode: true });
+  }
   const occComment = pathname.match(/^\/api\/occurrences\/([^/]+)\/comments$/);
   if (occComment && method === 'POST') { db.comments.push({ id: demoUuid('com'), occurrenceId: occComment[1], userId: currentUser?.id, comment: body.comment || '', visibility: body.visibility || 'INTERNAL', createdAt: demoNowIso() }); return save({ ok: true, previewMode: true }); }
   const cityNested = pathname.match(/^\/api\/cities\/([^/]+)\/(departments|neighborhoods|users)$/);
@@ -1868,10 +1940,41 @@ async function openOccurrenceDetail(id) {
   try {
     const data = await request(`/api/occurrences/${encodeURIComponent(id)}`);
     state.modalOccurrence = data.occurrence;
+    await loadDuplicateInsights(data.occurrence);
     await render();
   } catch (error) {
     toast(error.message || 'Não foi possível abrir os detalhes.');
   }
+}
+
+function cacheDuplicateInsights(occ, insights) {
+  if (!occ || !insights) return;
+  state.duplicateInsights[occ.id] = insights;
+  if (occ.protocol) state.duplicateInsights[occ.protocol] = insights;
+}
+
+function duplicateInsightsFor(occ) {
+  return state.duplicateInsights[occ?.id] || state.duplicateInsights[occ?.protocol] || null;
+}
+
+async function loadDuplicateInsights(occ) {
+  if (!occ?.id) return null;
+  try {
+    const insights = await request(`/api/occurrences/${encodeURIComponent(occ.id)}/duplicate-candidates`);
+    cacheDuplicateInsights(occ, insights);
+    return insights;
+  } catch (error) {
+    const fallback = { candidates: [], duplicateChildren: [], duplicateOf: null, error: error.message || 'Falha ao buscar duplicidades.' };
+    cacheDuplicateInsights(occ, fallback);
+    return fallback;
+  }
+}
+
+async function refreshModalOccurrence(id, options = {}) {
+  const refreshed = await request(`/api/occurrences/${encodeURIComponent(id)}`);
+  state.modalOccurrence = refreshed.occurrence;
+  if (options.duplicates) await loadDuplicateInsights(refreshed.occurrence);
+  return refreshed.occurrence;
 }
 
 function renderTriageSuggestionPanel(occ) {
@@ -1935,6 +2038,62 @@ function renderTriageSuggestionPanel(occ) {
   return `${summary}<div class="quick-actions"><button class="gov-button small primary" type="button" data-apply-triage-suggestion="${escapeHtml(key)}">Aplicar sugestão</button><button class="gov-button small" type="button" data-edit-triage-suggestion="${escapeHtml(key)}">Editar manualmente</button><button class="gov-button small ghost" type="button" data-ignore-triage-suggestion="${escapeHtml(key)}">Ignorar</button></div>`;
 }
 
+function renderDuplicateReference(item, options = {}) {
+  if (!item) return '';
+  const meta = [item.categoryName, item.neighborhoodName, fmtDate(item.createdAt)].filter(Boolean).join(' · ');
+  const score = Number(item.score || 0);
+  return `<article class="duplicate-card ${options.compact ? 'compact' : ''}">
+    <div class="duplicate-card__main">
+      <strong>${escapeHtml(item.protocol || item.id)}</strong>
+      <span>${escapeHtml(item.title || 'Ocorrencia relacionada')}</span>
+      <small>${escapeHtml(meta || 'Sem contexto adicional')}</small>
+    </div>
+    <div class="duplicate-card__meta">
+      ${item.status ? badgeStatus(item.status) : ''}
+      ${item.priority ? badgePriority(item.priority) : ''}
+      ${score ? `<span class="duplicate-score">${Math.round(score * 100)}%</span>` : ''}
+      ${item.linkedDuplicates ? `<small>${item.linkedDuplicates} agrupada(s)</small>` : ''}
+    </div>
+    ${options.actions ? `<div class="duplicate-card__actions">
+      <button class="gov-button small" type="button" data-duplicate-candidate-action="link" data-occurrence-id="${escapeHtml(options.occurrenceId)}" data-candidate-id="${escapeHtml(item.id)}">Vincular</button>
+      <button class="gov-button small danger" type="button" data-duplicate-candidate-action="archive" data-occurrence-id="${escapeHtml(options.occurrenceId)}" data-candidate-id="${escapeHtml(item.id)}">Vincular e arquivar</button>
+    </div>` : ''}
+    ${item.reason ? `<p>${escapeHtml(item.reason)}</p>` : ''}
+  </article>`;
+}
+
+function renderDuplicatePanel(occ) {
+  const insights = duplicateInsightsFor(occ);
+  const candidates = insights?.candidates || [];
+  const children = insights?.duplicateChildren || [];
+  const linkedParent = insights?.duplicateOf || null;
+  const candidateHtml = candidates.length
+    ? `<div class="duplicate-list">${candidates.map(item => renderDuplicateReference(item, { actions: true, occurrenceId: occ.id })).join('')}</div>`
+    : empty(insights?.error || 'Nenhuma ocorrencia semelhante forte encontrada agora.');
+  const childrenHtml = children.length
+    ? `<div class="duplicate-list compact">${children.map(item => renderDuplicateReference(item, { compact: true })).join('')}</div>`
+    : `<p class="muted-text">Nenhuma outra ocorrencia agrupada neste protocolo.</p>`;
+  return `
+    <div class="duplicate-panel">
+      ${linkedParent ? `<div class="notice-box"><strong>Duplicada de ${escapeHtml(linkedParent.protocol)}</strong><br><span>${escapeHtml(linkedParent.title || '')}</span></div>` : ''}
+      <div class="duplicate-panel__section">
+        <div class="duplicate-panel__head"><h4>Ocorrencias semelhantes</h4><button class="gov-button small ghost" type="button" data-refresh-duplicates="${escapeHtml(occ.id)}">Atualizar</button></div>
+        ${candidateHtml}
+      </div>
+      <div class="duplicate-panel__section">
+        <h4>Agrupadas neste protocolo</h4>
+        ${childrenHtml}
+      </div>
+      <form class="form-grid duplicate-manual-form" data-duplicate-occurrence="${escapeHtml(occ.id)}">
+        <div class="gov-field"><label>Protocolo ou ID principal</label><input name="duplicateOfId" placeholder="CID-2026-000001" /></div>
+        <div class="gov-field"><label>Acao</label><select name="duplicateMode"><option value="link">Vincular como duplicada</option><option value="archive">Vincular e arquivar duplicada</option></select></div>
+        <div class="full quick-actions"><button class="gov-button primary" type="submit">Confirmar vinculo</button></div>
+      </form>
+      <p class="muted-text">Nenhuma mesclagem e feita automaticamente; a decisao fica registrada no historico e na auditoria.</p>
+    </div>
+  `;
+}
+
 function renderOccurrenceModal(occ) {
   const departments = state.panelData?.departments || [];
   const users = (state.panelData?.users || []).filter(u => u.role !== 'CITIZEN');
@@ -1979,7 +2138,7 @@ function renderOccurrenceModal(occ) {
             </form>
           </div></section>
 
-          <section class="gov-section tight"><div class="gov-section__header"><h3>Vincular duplicidade</h3></div><div class="gov-section__body"><form class="form-grid" data-duplicate-occurrence="${escapeHtml(occ.id)}"><div class="gov-field"><label>Protocolo principal</label><input name="duplicateOfId" placeholder="CID-2026-000001" /></div><div style="align-self:end"><button class="gov-button" type="submit">Marcar como duplicada</button></div></form><p class="muted-text">Use apenas quando a demanda for o mesmo problema já protocolado em outro registro.</p></div></section>
+          <section class="gov-section tight"><div class="gov-section__header"><h3>Duplicidade e agrupamento</h3></div><div class="gov-section__body">${renderDuplicatePanel(occ)}</div></section>
           <section class="gov-section tight"><div class="gov-section__header"><h3>Histórico de movimentações</h3></div><div class="gov-section__body">${(occ.history || []).length ? `<ul class="timeline">${occ.history.map(item => `<li><strong>${escapeHtml(statusLabels[item.newStatus] || item.newStatus)}</strong><br>${escapeHtml(item.comment || item.publicMessage || 'Atualização registrada.')}<br><small>${fmtDate(item.createdAt)}</small></li>`).join('')}</ul>` : empty('Sem histórico adicional.')}</div></section>
         </div>
       </div>
@@ -2070,8 +2229,7 @@ function bindModalActions() {
       delete state.triageSuggestions[id];
       delete state.triageSuggestionModes[id];
       state.panelData = null;
-      const refreshed = await request(`/api/occurrences/${encodeURIComponent(id)}`);
-      state.modalOccurrence = refreshed.occurrence;
+      await refreshModalOccurrence(id, { duplicates: true });
       toast('Sugestão aplicada à ocorrência.');
       await render();
     } catch (error) {
@@ -2115,18 +2273,48 @@ function bindModalActions() {
   if (duplicateForm) duplicateForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     const id = duplicateForm.dataset.duplicateOccurrence;
-    const payload = Object.fromEntries(new FormData(duplicateForm).entries());
+    const data = Object.fromEntries(new FormData(duplicateForm).entries());
+    const duplicateOfId = String(data.duplicateOfId || '').trim();
+    if (!duplicateOfId) return toast('Informe o protocolo ou id principal.');
+    const archiveDuplicate = data.duplicateMode === 'archive';
+    if (!confirm(archiveDuplicate ? 'Vincular e arquivar esta duplicada?' : 'Vincular esta ocorrencia como duplicada?')) return;
     try {
-      await request(`/api/occurrences/${encodeURIComponent(id)}/mark-duplicate`, { method: 'PATCH', body: JSON.stringify(payload) });
-      toast('Ocorrência vinculada como duplicada.');
+      await request(`/api/occurrences/${encodeURIComponent(id)}/mark-duplicate`, { method: 'PATCH', body: JSON.stringify({ duplicateOfId, archiveDuplicate }) });
+      toast(archiveDuplicate ? 'Ocorrencia vinculada e arquivada.' : 'Ocorrencia vinculada como duplicada.');
       state.panelData = null;
-      const refreshed = await request(`/api/occurrences/${encodeURIComponent(id)}`);
-      state.modalOccurrence = refreshed.occurrence;
+      await refreshModalOccurrence(id, { duplicates: true });
       await render();
     } catch (error) {
       toast(error.message);
     }
   });
+
+  document.querySelectorAll('[data-duplicate-candidate-action]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.occurrenceId;
+    const duplicateOfId = button.dataset.candidateId;
+    const archiveDuplicate = button.dataset.duplicateCandidateAction === 'archive';
+    if (!id || !duplicateOfId) return;
+    if (!confirm(archiveDuplicate ? 'Vincular e arquivar esta duplicada?' : 'Vincular esta ocorrencia como duplicada?')) return;
+    try {
+      await request(`/api/occurrences/${encodeURIComponent(id)}/mark-duplicate`, { method: 'PATCH', body: JSON.stringify({ duplicateOfId, archiveDuplicate }) });
+      toast(archiveDuplicate ? 'Ocorrencia vinculada e arquivada.' : 'Ocorrencia vinculada como duplicada.');
+      state.panelData = null;
+      await refreshModalOccurrence(id, { duplicates: true });
+      await render();
+    } catch (error) {
+      toast(error.message || 'Nao foi possivel registrar duplicidade.');
+    }
+  }));
+
+  document.querySelectorAll('[data-refresh-duplicates]').forEach(button => button.addEventListener('click', async () => {
+    try {
+      if (state.modalOccurrence) await loadDuplicateInsights(state.modalOccurrence);
+      toast('Lista de duplicidades atualizada.');
+      await render();
+    } catch (error) {
+      toast(error.message || 'Nao foi possivel atualizar duplicidades.');
+    }
+  }));
 
 
   const uploadForm = document.querySelector('[data-upload-attachment]');

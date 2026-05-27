@@ -364,7 +364,7 @@ function buildRiskProfile(priority = 'MEDIA', text = '') {
   return { riskLevel, riskFactors: factors.length ? factors : ['sem fator critico explicito no relato'] };
 }
 
-function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '' } = {}) {
+function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '', minScore = 0.42, limit = 3 } = {}) {
   const activeStatuses = new Set(['RECEBIDO','EM_ANALISE','ENCAMINHADO','EM_EXECUCAO','AGUARDANDO_TERCEIRO']);
   const normalizedAddress = normalizeRuleText([address, referencePoint].filter(Boolean).join(' '));
   return occurrences
@@ -382,13 +382,61 @@ function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId =
         protocol: item.protocol,
         title: trimAssistiveText(item.title || item.description || 'Ocorrencia similar', 90),
         status: item.status,
+        priority: item.priority,
+        categoryId: item.categoryId,
+        neighborhoodId: item.neighborhoodId,
+        duplicateOfId: item.duplicateOfId || null,
+        createdAt: item.createdAt,
         score: Number(Math.min(score, 0.99).toFixed(2)),
         reason: neighborhoodId && item.neighborhoodId === neighborhoodId ? 'Mesmo bairro e relato semelhante.' : 'Relato semelhante encontrado.'
       };
     })
-    .filter((item) => item.score >= 0.42)
+    .filter((item) => item.score >= minScore)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+    .slice(0, limit);
+}
+
+function duplicateOccurrenceReference(db, occurrence) {
+  if (!occurrence) return null;
+  const category = db.categories.find((item) => item.id === occurrence.categoryId) || null;
+  const neighborhood = db.neighborhoods.find((item) => item.id === occurrence.neighborhoodId) || null;
+  return {
+    id: occurrence.id,
+    protocol: occurrence.protocol,
+    title: trimAssistiveText(occurrence.title || occurrence.description || 'Ocorrencia', 120),
+    status: occurrence.status,
+    priority: occurrence.priority,
+    categoryId: occurrence.categoryId,
+    categoryName: category?.name || '',
+    neighborhoodId: occurrence.neighborhoodId,
+    neighborhoodName: neighborhood?.name || '',
+    duplicateOfId: occurrence.duplicateOfId || null,
+    createdAt: occurrence.createdAt
+  };
+}
+
+function duplicateCandidateContext(db, occurrence) {
+  const text = [occurrence.title, occurrence.description, occurrence.address, occurrence.referencePoint].filter(Boolean).join(' ');
+  const candidates = findDuplicateCandidates(db.occurrences, {
+    cityId: occurrence.cityId,
+    occurrenceId: occurrence.id,
+    text,
+    categoryId: occurrence.categoryId,
+    neighborhoodId: occurrence.neighborhoodId,
+    address: occurrence.address,
+    referencePoint: occurrence.referencePoint,
+    minScore: 0.32,
+    limit: 6
+  }).map((candidate) => {
+    const full = db.occurrences.find((item) => item.id === candidate.id);
+    const reference = duplicateOccurrenceReference(db, full);
+    return { ...candidate, ...reference, score: candidate.score, reason: candidate.reason, linkedDuplicates: db.occurrences.filter((item) => item.duplicateOfId === candidate.id).length };
+  });
+  return {
+    candidates,
+    duplicateOf: duplicateOccurrenceReference(db, db.occurrences.find((item) => item.id === occurrence.duplicateOfId)),
+    duplicateChildren: db.occurrences.filter((item) => item.duplicateOfId === occurrence.id).map((item) => duplicateOccurrenceReference(db, item))
+  };
 }
 
 function buildAssistiveTriageFallback(input = {}) {
@@ -627,6 +675,16 @@ async function serializeRows(rows, cityId) {
   const ids = rows.map(r => r.id);
   const lookups = await occurrenceLookups(cityId || rows[0]?.city_id, ids);
   return rows.map(r => occurrenceFromDb(r, lookups));
+}
+async function duplicateContextFromSupabase(occurrenceRow) {
+  const cityId = occurrenceRow.city_id;
+  const [occurrenceRows, categories, neighborhoods] = await Promise.all([
+    supa(`occurrences?city_id=eq.${encodeURIComponent(cityId)}&select=*&order=created_at.desc&limit=120`).then(r => r.map(occurrenceBaseFromDb)),
+    supa('occurrence_categories?select=*').then(r => r.map(categoryFromDb)),
+    supa(`neighborhoods?city_id=eq.${encodeURIComponent(cityId)}&select=*`).then(r => r.map(neighborhoodFromDb))
+  ]);
+  const occurrence = occurrenceRows.find((item) => item.id === occurrenceRow.id) || occurrenceBaseFromDb(occurrenceRow);
+  return duplicateCandidateContext({ occurrences: occurrenceRows, categories, neighborhoods }, occurrence);
 }
 function dbStatus(value) { return statusToDb[String(value || '').toUpperCase()] || value || 'recebido'; }
 function dbPriority(value) { return priorityToDb[String(value || '').toUpperCase()] || value || 'media'; }
@@ -1302,6 +1360,15 @@ export default async function handler(req, res) {
       const [occ] = await serializeRows(rows, rows[0].city_id);
       return ok(res, { occurrence: occ });
     }
+    const occDuplicateCandidates = pathname.match(/^\/api\/occurrences\/([^/]+)\/duplicate-candidates$/);
+    if (occDuplicateCandidates && req.method === 'GET') {
+      const id = encodeURIComponent(decodeURIComponent(occDuplicateCandidates[1]));
+      const rows = await supa(`occurrences?or=(id.eq.${id},protocol.eq.${id})&select=*&limit=1`);
+      const occurrence = rows[0];
+      if (!occurrence) return fail(res, 404, 'Ocorrencia nao encontrada.');
+      if (user.cityId && user.cityId !== occurrence.city_id) return fail(res, 403, 'Acesso restrito para esta cidade.');
+      return ok(res, await duplicateContextFromSupabase(occurrence));
+    }
     const occStatus = pathname.match(/^\/api\/occurrences\/([^/]+)\/status$/);
     if (occStatus && ['PATCH','POST'].includes(req.method)) {
       const id = occStatus[1];
@@ -1369,9 +1436,48 @@ export default async function handler(req, res) {
     }
     const occDup = pathname.match(/^\/api\/occurrences\/([^/]+)\/mark-duplicate$/);
     if (occDup && req.method === 'PATCH') {
-      const main = await supa(`occurrences?protocol=eq.${encodeURIComponent(body.protocol || '')}&select=*&limit=1`);
-      if (!main[0]) return fail(res, 404, 'Protocolo principal não encontrado.');
-      const rows = await supa(`occurrences?id=eq.${occDup[1]}`, { method: 'PATCH', body: JSON.stringify({ status: 'duplicado', duplicate_of_id: main[0].id, public_message: `Ocorrência duplicada do protocolo ${main[0].protocol}.` }) });
+      if (!['SUPER_ADMIN','CITY_ADMIN','DEPARTMENT_MANAGER'].includes(user.role)) return fail(res, 403, 'Acesso restrito para esta acao.');
+      const id = encodeURIComponent(decodeURIComponent(occDup[1]));
+      const target = String(body.duplicateOfId || body.candidateId || body.protocol || '').trim();
+      if (!target) return fail(res, 400, 'Informe o protocolo ou id da ocorrencia principal.');
+      const [oldRows, parentRows] = await Promise.all([
+        supa(`occurrences?or=(id.eq.${id},protocol.eq.${id})&select=*&limit=1`),
+        supa(`occurrences?or=(id.eq.${encodeURIComponent(target)},protocol.eq.${encodeURIComponent(target)})&select=*&limit=1`)
+      ]);
+      const old = oldRows[0];
+      const parent = parentRows[0];
+      if (!old || !parent) return fail(res, 404, 'Ocorrencia original ou principal nao encontrada.');
+      if (user.cityId && user.cityId !== old.city_id) return fail(res, 403, 'Acesso restrito para esta cidade.');
+      if (old.city_id !== parent.city_id) return fail(res, 403, 'Acesso restrito para esta cidade.');
+      if (old.id === parent.id) return fail(res, 400, 'Uma ocorrencia nao pode ser duplicada dela mesma.');
+      if (parent.duplicate_of_id === old.id) return fail(res, 400, 'Vinculo recusado para evitar ciclo de duplicidade.');
+      const archiveDuplicate = Boolean(body.archiveDuplicate);
+      const now = new Date().toISOString();
+      const updates = {
+        status: archiveDuplicate ? 'arquivado' : 'duplicado',
+        duplicate_of_id: parent.id,
+        public_message: `Esta ocorrencia foi vinculada ao protocolo principal ${parent.protocol}.`,
+        updated_at: now
+      };
+      const rows = await supa(`occurrences?id=eq.${old.id}`, { method: 'PATCH', body: JSON.stringify(updates) });
+      await supa('occurrence_status_history', { method: 'POST', body: JSON.stringify([{
+        occurrence_id: old.id,
+        city_id: old.city_id,
+        changed_by: user.id,
+        old_status: old.status,
+        new_status: updates.status,
+        comment: `${archiveDuplicate ? 'Ocorrencia arquivada como duplicada' : 'Ocorrencia marcada como duplicada'} do protocolo ${parent.protocol}.`,
+        public_message: updates.public_message,
+        visibility: 'publica'
+      }]) });
+      await supa('occurrence_comments', { method: 'POST', body: JSON.stringify([{
+        occurrence_id: parent.id,
+        city_id: parent.city_id,
+        user_id: user.id,
+        comment: `Ocorrencia ${old.protocol} agrupada como duplicada. ${trimAssistiveText(old.title || old.description || '', 140)}`,
+        visibility: 'interna'
+      }]) });
+      await audit(old.city_id, user.id, archiveDuplicate ? 'OCCURRENCE_ARCHIVED_AS_DUPLICATE' : 'OCCURRENCE_MARKED_DUPLICATE', 'Occurrence', old.id, { duplicateOfId: parent.id, parentProtocol: parent.protocol, archiveDuplicate, previousStatus: old.status });
       const [occ] = rows.length ? await serializeRows(rows, rows[0].city_id) : [null];
       return ok(res, { occurrence: occ });
     }
