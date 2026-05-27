@@ -95,3 +95,17 @@ A Fase 3.0 mantem a IA como camada assistiva e opcional no backend. Quando uma c
 Se nao houver chave de IA, timeout ou falha externa, o sistema usa o fallback por regras locais da Fase 2.9 e continua funcionando. Nenhuma sugestao e aplicada sem confirmacao explicita do agente.
 
 Os dados de aplicacao continuam usando campos ja existentes de `occurrences`, `occurrence_status_history`, `audit_logs` e `payload_json` de `whatsapp_messages`.
+
+## Fase 3.1 - Duplicidade e agrupamento
+
+Sem SQL obrigatorio novo.
+
+A Fase 3.1 reutiliza campos e tabelas ja previstos:
+
+- `occurrences.duplicate_of_id` para vincular a ocorrencia duplicada ao protocolo principal;
+- `occurrences.status` com `DUPLICADO` ou `ARQUIVADO`, conforme decisao explicita do agente;
+- `occurrence_status_history` para registrar a decisao operacional;
+- `occurrence_comments` para registrar no protocolo principal quais relatos foram agrupados;
+- `audit_logs` para rastreabilidade da acao de vinculo ou arquivamento.
+
+Nao ha mesclagem automatica. O sistema apenas sugere candidatos por categoria, bairro, endereco e similaridade textual; o vinculo depende de confirmacao humana no painel.

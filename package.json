@@ -1,7 +1,7 @@
 {
-  "name": "cidadeos-ai-fase3-0-ia-assistida-triagem",
-  "version": "3.0.0",
-  "description": "CidadeOS AI - Fase 3.0 com IA assistida opcional para classificacao, resumo e triagem com fallback local.",
+  "name": "cidadeos-ai-fase3-1-duplicidade-agrupamento",
+  "version": "3.1.0",
+  "description": "CidadeOS AI - Fase 3.1 com deteccao, vinculo e arquivamento assistido de duplicidades.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {

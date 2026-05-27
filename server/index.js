@@ -306,7 +306,7 @@ function buildRiskProfile(priority = 'MEDIA', text = '') {
   return { riskLevel, riskFactors: factors.length ? factors : ['sem fator critico explicito no relato'] };
 }
 
-function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '' } = {}) {
+function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId = '', text = '', categoryId = '', neighborhoodId = '', address = '', referencePoint = '', minScore = 0.42, limit = 3 } = {}) {
   const activeStatuses = new Set(['RECEBIDO','EM_ANALISE','ENCAMINHADO','EM_EXECUCAO','AGUARDANDO_TERCEIRO']);
   const normalizedAddress = normalizeRuleText([address, referencePoint].filter(Boolean).join(' '));
   return occurrences
@@ -324,13 +324,61 @@ function findDuplicateCandidates(occurrences = [], { cityId = '', occurrenceId =
         protocol: item.protocol,
         title: trimAssistiveText(item.title || item.description || 'Ocorrencia similar', 90),
         status: item.status,
+        priority: item.priority,
+        categoryId: item.categoryId,
+        neighborhoodId: item.neighborhoodId,
+        duplicateOfId: item.duplicateOfId || null,
+        createdAt: item.createdAt,
         score: Number(Math.min(score, 0.99).toFixed(2)),
         reason: neighborhoodId && item.neighborhoodId === neighborhoodId ? 'Mesmo bairro e relato semelhante.' : 'Relato semelhante encontrado.'
       };
     })
-    .filter((item) => item.score >= 0.42)
+    .filter((item) => item.score >= minScore)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+    .slice(0, limit);
+}
+
+function duplicateOccurrenceReference(db, occurrence) {
+  if (!occurrence) return null;
+  const category = db.categories.find((item) => item.id === occurrence.categoryId) || null;
+  const neighborhood = db.neighborhoods.find((item) => item.id === occurrence.neighborhoodId) || null;
+  return {
+    id: occurrence.id,
+    protocol: occurrence.protocol,
+    title: trimAssistiveText(occurrence.title || occurrence.description || 'Ocorrencia', 120),
+    status: occurrence.status,
+    priority: occurrence.priority,
+    categoryId: occurrence.categoryId,
+    categoryName: category?.name || '',
+    neighborhoodId: occurrence.neighborhoodId,
+    neighborhoodName: neighborhood?.name || '',
+    duplicateOfId: occurrence.duplicateOfId || null,
+    createdAt: occurrence.createdAt
+  };
+}
+
+function duplicateCandidateContext(db, occurrence) {
+  const text = [occurrence.title, occurrence.description, occurrence.address, occurrence.referencePoint].filter(Boolean).join(' ');
+  const candidates = findDuplicateCandidates(db.occurrences, {
+    cityId: occurrence.cityId,
+    occurrenceId: occurrence.id,
+    text,
+    categoryId: occurrence.categoryId,
+    neighborhoodId: occurrence.neighborhoodId,
+    address: occurrence.address,
+    referencePoint: occurrence.referencePoint,
+    minScore: 0.32,
+    limit: 6
+  }).map((candidate) => {
+    const full = db.occurrences.find((item) => item.id === candidate.id);
+    const reference = duplicateOccurrenceReference(db, full);
+    return { ...candidate, ...reference, score: candidate.score, reason: candidate.reason, linkedDuplicates: db.occurrences.filter((item) => item.duplicateOfId === candidate.id).length };
+  });
+  return {
+    candidates,
+    duplicateOf: duplicateOccurrenceReference(db, db.occurrences.find((item) => item.id === occurrence.duplicateOfId)),
+    duplicateChildren: db.occurrences.filter((item) => item.duplicateOfId === occurrence.id).map((item) => duplicateOccurrenceReference(db, item))
+  };
 }
 
 function buildAssistiveTriageFallback(db, input = {}) {
@@ -1112,6 +1160,15 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, occurrence: updated });
   }
 
+  const occurrenceDuplicateCandidatesMatch = pathname.match(/^\/api\/occurrences\/([^/]+)\/duplicate-candidates$/);
+  if (occurrenceDuplicateCandidatesMatch && req.method === 'GET') {
+    const id = occurrenceDuplicateCandidatesMatch[1];
+    const db = readDb();
+    const occurrence = scopeOccurrencesForUser(db, user).find((item) => item.id === id || item.protocol === id);
+    if (!occurrence) return sendError(res, 404, 'Ocorrencia nao encontrada.');
+    return sendJson(res, 200, { ok: true, ...duplicateCandidateContext(db, occurrence) });
+  }
+
   const occurrenceDuplicateMatch = pathname.match(/^\/api\/occurrences\/([^/]+)\/mark-duplicate$/);
   if (occurrenceDuplicateMatch && req.method === 'PATCH') {
     if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER])) return;
@@ -1119,14 +1176,36 @@ async function handleApi(req, res, pathname) {
     const body = await parseJsonBody(req, MAX_JSON_BYTES);
     const updated = transaction((db) => {
       const occurrence = db.occurrences.find((item) => item.id === id || item.protocol === id);
-      const parent = db.occurrences.find((item) => item.id === body.duplicateOfId || item.protocol === body.duplicateOfId);
+      const target = normalizeText(body.duplicateOfId || body.candidateId || body.protocol);
+      const parent = db.occurrences.find((item) => item.id === target || item.protocol === target);
       if (!occurrence || !parent) throw Object.assign(new Error('Ocorrência original ou duplicada não encontrada.'), { status: 404 });
+      if (occurrence.id === parent.id) throw Object.assign(new Error('Uma ocorrencia nao pode ser duplicada dela mesma.'), { status: 400 });
+      if (parent.duplicateOfId === occurrence.id) throw Object.assign(new Error('Vinculo recusado para evitar ciclo de duplicidade.'), { status: 400 });
       if (occurrence.cityId !== parent.cityId || !userCanAccessCity(user, occurrence.cityId)) throw Object.assign(new Error('Acesso restrito para esta cidade.'), { status: 403 });
+      const oldStatus = occurrence.status;
+      const archiveDuplicate = Boolean(body.archiveDuplicate);
       occurrence.duplicateOfId = parent.id;
-      occurrence.status = 'DUPLICADO';
-      occurrence.publicMessage = `Esta ocorrência foi vinculada ao protocolo principal ${parent.protocol}.`;
+      occurrence.status = archiveDuplicate ? 'ARQUIVADO' : 'DUPLICADO';
+      occurrence.publicMessage = `Esta ocorrencia foi vinculada ao protocolo principal ${parent.protocol}.`;
       occurrence.updatedAt = nowIso();
-      addAudit(db, { cityId: occurrence.cityId, userId: user.id, action: 'OCCURRENCE_MARKED_DUPLICATE', entityType: 'Occurrence', entityId: occurrence.id, metadata: { duplicateOfId: parent.id } });
+      db.statusHistory.push({
+        id: uuid('hist'), occurrenceId: occurrence.id, changedBy: user.id, oldStatus, newStatus: occurrence.status,
+        comment: `${archiveDuplicate ? 'Ocorrencia arquivada como duplicada' : 'Ocorrencia marcada como duplicada'} do protocolo ${parent.protocol}.`,
+        publicMessage: occurrence.publicMessage, createdAt: nowIso()
+      });
+      db.comments.push({
+        id: uuid('comment'), occurrenceId: parent.id, userId: user.id,
+        comment: `Ocorrencia ${occurrence.protocol} agrupada como duplicada. ${trimAssistiveText(occurrence.title || occurrence.description || '', 140)}`,
+        visibility: 'INTERNAL', createdAt: nowIso()
+      });
+      addAudit(db, {
+        cityId: occurrence.cityId,
+        userId: user.id,
+        action: archiveDuplicate ? 'OCCURRENCE_ARCHIVED_AS_DUPLICATE' : 'OCCURRENCE_MARKED_DUPLICATE',
+        entityType: 'Occurrence',
+        entityId: occurrence.id,
+        metadata: { duplicateOfId: parent.id, parentProtocol: parent.protocol, archiveDuplicate, previousStatus: oldStatus }
+      });
       return serializeOccurrence(db, occurrence);
     });
     return sendJson(res, 200, { ok: true, occurrence: updated });
@@ -1615,6 +1694,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`CidadeOS AI Fase 3.0 IA assistida rodando em http://${HOST}:${PORT}`);
+  console.log(`CidadeOS AI Fase 3.1 duplicidade e agrupamento rodando em http://${HOST}:${PORT}`);
   console.log('Contas demo: admin@cidadeos.local / CidadeOS@123 | agente@cidadeos.local / CidadeOS@123');
 });
