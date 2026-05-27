@@ -18,6 +18,7 @@ const state = {
   triageSuggestions: {},
   triageSuggestionModes: {},
   duplicateInsights: {},
+  mapFilters: {},
   lastProtocol: sessionStorage.getItem('cidadeos_last_protocol') || ''
 };
 
@@ -262,6 +263,33 @@ function demoComputeSla(priority) { const d = new Date(); d.setHours(d.getHours(
 function triageSlaHours(priority) { return priority === 'CRITICA' ? 2 : priority === 'ALTA' ? 24 : priority === 'MEDIA' ? 72 : 168; }
 function normalizeRuleText(value = '') {
   return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function toOptionalCoordinate(value, type = 'lat') {
+  const raw = String(value ?? '').replace(',', '.').trim();
+  if (!raw) return null;
+  const number = Number(raw);
+  const limit = type === 'lng' ? 180 : 90;
+  return Number.isFinite(number) && Math.abs(number) <= limit ? number : null;
+}
+
+function normalizeLocationPayload(input = {}) {
+  const latitude = toOptionalCoordinate(input.latitude, 'lat');
+  const longitude = toOptionalCoordinate(input.longitude, 'lng');
+  const hasPair = latitude !== null && longitude !== null;
+  const wantsPrecise = input.locationPrecision === 'EXATA_CONSENTIDA';
+  const consent = ['true', 'on', '1', true].includes(input.locationConsent);
+  if (!hasPair) return { latitude: null, longitude: null, locationPrecision: 'APROXIMADA' };
+  const precise = wantsPrecise && consent;
+  return {
+    latitude: Number(latitude.toFixed(precise ? 6 : 3)),
+    longitude: Number(longitude.toFixed(precise ? 6 : 3)),
+    locationPrecision: precise ? 'EXATA_CONSENTIDA' : 'APROXIMADA'
+  };
+}
+
+function safePublicAddress(value = '') {
+  return String(value || '').replace(/\b\d+[a-zA-Z]?\b/g, '').replace(/\s*,\s*/g, ', ').replace(/,\s*$/g, '').replace(/\s+/g, ' ').trim();
 }
 const localTriageRules = [
   { key: 'defesa_civil', priority: 'CRITICA', keywords: ['alagamento', 'alag', 'enchente', 'arvore', 'queda de arvore', 'deslizamento', 'area de risco', 'risco imediato', 'desabamento'], publicMessage: 'Solicitação de risco recebida para avaliação prioritária da equipe responsável.', departmentHints: ['defesa', 'risco'] },
@@ -538,7 +566,7 @@ function demoSerializeOccurrence(db, occ) {
 }
 function demoPublicOccurrence(db, occ) {
   const s = demoSerializeOccurrence(db, occ);
-  return { protocol: s.protocol, title: s.title, description: s.description, category: s.category?.name || '', subcategory: s.subcategory?.name || '', neighborhood: s.neighborhood?.name || '', department: s.department?.name || '', priority: s.priority, status: s.status, address: s.address, referencePoint: s.referencePoint, publicMessage: s.publicMessage, slaDueAt: s.slaDueAt, createdAt: s.createdAt, updatedAt: s.updatedAt, resolvedAt: s.resolvedAt, attachments: (s.attachments || []).filter(a => ['PUBLIC','PUBLICA'].includes(String(a.visibility || '').toUpperCase()) && !a.archivedAt && !a.deletedAt), publicHistory: s.history.filter(h => h.publicMessage).map(h => ({ status: h.newStatus, publicMessage: h.publicMessage, createdAt: h.createdAt })) };
+  return { protocol: s.protocol, title: s.title, description: s.description, category: s.category?.name || '', subcategory: s.subcategory?.name || '', neighborhood: s.neighborhood?.name || '', department: s.department?.name || '', priority: s.priority, status: s.status, address: safePublicAddress(s.address), referencePoint: s.referencePoint, publicMessage: s.publicMessage, slaDueAt: s.slaDueAt, createdAt: s.createdAt, updatedAt: s.updatedAt, resolvedAt: s.resolvedAt, attachments: (s.attachments || []).filter(a => ['PUBLIC','PUBLICA'].includes(String(a.visibility || '').toUpperCase()) && !a.archivedAt && !a.deletedAt), publicHistory: s.history.filter(h => h.publicMessage).map(h => ({ status: h.newStatus, publicMessage: h.publicMessage, createdAt: h.createdAt })) };
 }
 function mediaExtensionFromMime(mime = '') {
   const value = String(mime || '').toLowerCase();
@@ -631,10 +659,11 @@ async function demoRequest(path, options = {}) {
     const priority = body.priority || subcategory?.defaultPriority || 'MEDIA';
     const citizen = { id: demoUuid('citizen'), cityId: db.cities[0].id, name: body.citizenName || 'Morador', phone: body.citizenPhone || '', email: body.citizenEmail || '', createdAt: demoNowIso() };
     db.citizens.push(citizen);
-    const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: body.title || 'Ocorrência registrada pelo morador', description: body.description || '', categoryId: category.id, subcategoryId: subcategory?.id || null, neighborhoodId: body.neighborhoodId || null, departmentId, assignedAgentId: null, citizenId: citizen.id, priority, status: 'RECEBIDO', address: body.address || '', referencePoint: body.referencePoint || '', latitude: null, longitude: null, publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(priority), publicMessage: 'Ocorrência recebida no ambiente demonstrativo online.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() };
+    const location = normalizeLocationPayload(body);
+    const occ = { id: demoUuid('occ'), cityId: db.cities[0].id, protocol: demoNextProtocol(db), title: body.title || 'Ocorrência registrada pelo morador', description: body.description || '', categoryId: category.id, subcategoryId: subcategory?.id || null, neighborhoodId: body.neighborhoodId || null, departmentId, assignedAgentId: null, citizenId: citizen.id, priority, status: 'RECEBIDO', address: body.address || '', referencePoint: body.referencePoint || '', latitude: location.latitude, longitude: location.longitude, locationPrecision: location.locationPrecision, publicVisibility: true, duplicateOfId: null, slaDueAt: demoComputeSla(priority), publicMessage: 'Ocorrência recebida no ambiente demonstrativo online.', resolvedAt: null, createdAt: demoNowIso(), updatedAt: demoNowIso() };
     db.occurrences.push(occ);
     db.statusHistory.push({ id: demoUuid('hist'), occurrenceId: occ.id, changedBy: null, oldStatus: null, newStatus: 'RECEBIDO', publicMessage: occ.publicMessage, createdAt: demoNowIso() });
-    db.auditLogs.push({ id: demoUuid('audit'), cityId: occ.cityId, userId: null, action: 'PREVIEW_PUBLIC_OCCURRENCE_CREATED', entityType: 'Occurrence', entityId: occ.id, createdAt: demoNowIso() });
+    db.auditLogs.push({ id: demoUuid('audit'), cityId: occ.cityId, userId: null, action: 'PREVIEW_PUBLIC_OCCURRENCE_CREATED', entityType: 'Occurrence', entityId: occ.id, metadata: { locationPrecision: location.locationPrecision }, createdAt: demoNowIso() });
     return save({ ok: true, occurrence: demoPublicOccurrence(db, occ), previewMode: true });
   }
   const pubOcc = pathname.match(/^\/api\/public\/occurrences\/([^/]+)$/);
@@ -1120,6 +1149,10 @@ async function pageOccurrenceForm() {
           <div class="gov-field"><label for="priority">Urgência percebida</label><select id="priority" name="priority"><option value="MEDIA">Média</option><option value="BAIXA">Baixa</option><option value="ALTA">Alta</option><option value="CRITICA">Crítica</option></select></div>
           <div class="gov-field"><label for="address">Endereço</label><input id="address" name="address" placeholder="Rua, número ou local aproximado" /></div>
           <div class="gov-field"><label for="referencePoint">Ponto de referência</label><input id="referencePoint" name="referencePoint" placeholder="Ex.: próximo à escola municipal" /></div>
+          <div class="gov-field"><label for="latitude">Latitude opcional</label><input id="latitude" name="latitude" inputmode="decimal" placeholder="-23.5505" /><span class="form-help">Use apenas se a pessoa informar ou autorizar. Coordenadas aproximadas sao suficientes.</span></div>
+          <div class="gov-field"><label for="longitude">Longitude opcional</label><input id="longitude" name="longitude" inputmode="decimal" placeholder="-46.6333" /></div>
+          <div class="gov-field full"><label for="locationPrecision">Privacidade da localizacao</label><select id="locationPrecision" name="locationPrecision"><option value="APROXIMADA">Aproximada por padrao</option><option value="EXATA_CONSENTIDA">Precisa, com consentimento explicito</option></select><span class="form-help">Sem consentimento, o sistema reduz a precisao antes de salvar.</span></div>
+          <div class="full checkbox-line"><input id="locationConsent" name="locationConsent" type="checkbox" /><label for="locationConsent">Tenho consentimento para registrar localizacao precisa quando selecionada acima.</label></div>
           <div class="gov-field"><label for="citizenName">Nome do solicitante</label><input id="citizenName" name="citizenName" placeholder="Opcional" /></div>
           <div class="gov-field"><label for="citizenPhone">Telefone</label><input id="citizenPhone" name="citizenPhone" placeholder="Opcional" /></div>
           <div class="gov-field"><label for="citizenEmail">E-mail</label><input id="citizenEmail" name="citizenEmail" type="email" placeholder="Opcional" /></div>
@@ -1234,6 +1267,7 @@ async function pagePanel() {
           ${panelTab('overview', 'Visão geral')}
           ${panelTab('triage', 'SLA e triagem')}
           ${panelTab('occurrences', 'Ocorrências')}
+          ${panelTab('map', 'Mapa')}
           ${panelTab('structure', 'Bairros e setores')}
           ${panelTab('whatsapp-triage', 'Triagem WhatsApp')}
           ${panelTab('whatsapp', 'WhatsApp Business')}
@@ -1253,6 +1287,7 @@ function panelTab(id, label) {
 function renderPanelTab() {
   if (state.panelTab === 'triage') return panelTriage();
   if (state.panelTab === 'occurrences') return panelOccurrences();
+  if (state.panelTab === 'map') return panelMap();
   if (state.panelTab === 'structure') return panelStructure();
   if (state.panelTab === 'whatsapp-triage') return panelWhatsAppTriage();
   if (state.panelTab === 'whatsapp') return panelWhatsApp();
@@ -1459,6 +1494,189 @@ function panelOccurrences() {
         <div id="occurrenceList">${occurrenceTable(state.occurrences)}</div>
       </div>
     </section>
+  `;
+}
+
+function panelMap() {
+  const neighborhoods = state.panelData.neighborhoods || [];
+  const filters = normalizeMapFilters(state.mapFilters || {});
+  const rows = state.panelData.occurrences?.occurrences || state.occurrences || [];
+  return `
+    <section class="gov-section">
+      <div class="gov-section__header"><div><h1>Mapa operacional</h1><p>Visualizacao interna por bairro/regiao, pontos criticos e calor territorial. Coordenadas precisas so entram com consentimento explicito.</p></div><button class="gov-button small" data-refresh-panel>Atualizar</button></div>
+      <div class="gov-section__body">
+        <form class="filters map-filters" id="mapFilters">
+          <div class="gov-field"><label>Bairro/regiao</label><select name="neighborhoodId"><option value="">Todos</option>${neighborhoods.map(n => `<option value="${escapeHtml(n.id)}" ${filters.neighborhoodId === n.id ? 'selected' : ''}>${escapeHtml(n.name)}</option>`).join('')}</select></div>
+          <div class="gov-field"><label>Prioridade</label><select name="priority"><option value="">Todas</option>${Object.entries(priorityLabels).map(([k,v]) => `<option value="${k}" ${filters.priority === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+          <div class="gov-field"><label>Status</label><select name="status"><option value="">Todos</option>${Object.entries(statusLabels).map(([k,v]) => `<option value="${k}" ${filters.status === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+          <label class="check-field map-critical-toggle"><input type="checkbox" name="criticalOnly" value="1" ${filters.criticalOnly ? 'checked' : ''} /> Criticas abertas</label>
+          <button class="gov-button" type="submit">Atualizar mapa</button>
+        </form>
+        <div id="mapDashboard">${renderMapDashboard(rows, neighborhoods, filters)}</div>
+      </div>
+    </section>
+  `;
+}
+
+function normalizeMapFilters(input = {}) {
+  return {
+    neighborhoodId: String(input.neighborhoodId || ''),
+    priority: String(input.priority || ''),
+    status: String(input.status || ''),
+    criticalOnly: input.criticalOnly === true || input.criticalOnly === '1' || input.criticalOnly === 'on'
+  };
+}
+
+function mapFilteredOccurrences(rows = [], filters = {}) {
+  const f = normalizeMapFilters(filters);
+  return (rows || []).filter((occ) => {
+    const neighborhoodId = occ.neighborhoodId || occ.neighborhood?.id || '';
+    if (f.neighborhoodId && neighborhoodId !== f.neighborhoodId) return false;
+    if (f.priority && occ.priority !== f.priority) return false;
+    if (f.status && occ.status !== f.status) return false;
+    if (f.criticalOnly && !(occ.priority === 'CRITICA' && !isClosedStatus(occ.status))) return false;
+    return true;
+  });
+}
+
+function mapHash(value = '') {
+  return String(value || '').split('').reduce((acc, char) => ((acc * 31) + char.charCodeAt(0)) >>> 0, 7);
+}
+
+function mapHasCoordinates(occ = {}) {
+  const lat = Number(occ.latitude);
+  const lng = Number(occ.longitude);
+  return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+}
+
+function mapCoordinateBounds(rows = []) {
+  const points = rows.filter(mapHasCoordinates).map(occ => ({ lat: Number(occ.latitude), lng: Number(occ.longitude) }));
+  if (!points.length) return null;
+  let minLat = Math.min(...points.map(p => p.lat));
+  let maxLat = Math.max(...points.map(p => p.lat));
+  let minLng = Math.min(...points.map(p => p.lng));
+  let maxLng = Math.max(...points.map(p => p.lng));
+  if (minLat === maxLat) { minLat -= 0.001; maxLat += 0.001; }
+  if (minLng === maxLng) { minLng -= 0.001; maxLng += 0.001; }
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+function mapHeatByNeighborhood(rows = [], neighborhoods = []) {
+  const byId = new Map((neighborhoods || []).map((item, index) => [item.id, { id: item.id, name: item.name || 'Bairro sem nome', index, total: 0, critical: 0, open: 0 }]));
+  const fallback = { id: '__none', name: 'Sem bairro informado', index: byId.size, total: 0, critical: 0, open: 0 };
+  (rows || []).forEach((occ) => {
+    const id = occ.neighborhoodId || occ.neighborhood?.id || '__none';
+    let entry = id === '__none' ? fallback : byId.get(id);
+    if (!entry) {
+      entry = { id, name: occ.neighborhood?.name || 'Regiao sem cadastro', index: byId.size, total: 0, critical: 0, open: 0 };
+      byId.set(id, entry);
+    }
+    entry.total += 1;
+    if (!isClosedStatus(occ.status)) entry.open += 1;
+    if (occ.priority === 'CRITICA' && !isClosedStatus(occ.status)) entry.critical += 1;
+  });
+  const result = [...byId.values()];
+  if (fallback.total) result.push(fallback);
+  return result.length ? result : [fallback];
+}
+
+function neighborhoodMapPoint(entry = {}, index = 0, total = 1) {
+  const count = Math.max(1, total);
+  const cols = Math.min(4, Math.ceil(Math.sqrt(count)));
+  const rows = Math.ceil(count / cols);
+  const cellW = 640 / cols;
+  const cellH = 340 / rows;
+  const pos = Number.isFinite(entry.index) ? entry.index : index;
+  const col = pos % cols;
+  const row = Math.floor(pos / cols);
+  return { x: 40 + (cellW * (col + 0.5)), y: 40 + (cellH * (row + 0.5)) };
+}
+
+function occurrenceMapPoint(occ = {}, heat = [], bounds = null, index = 0) {
+  if (bounds && mapHasCoordinates(occ)) {
+    const lat = Number(occ.latitude);
+    const lng = Number(occ.longitude);
+    const x = 40 + ((lng - bounds.minLng) / (bounds.maxLng - bounds.minLng)) * 640;
+    const y = 40 + ((bounds.maxLat - lat) / (bounds.maxLat - bounds.minLat)) * 340;
+    return { x, y, approximate: false };
+  }
+  const neighborhoodId = occ.neighborhoodId || occ.neighborhood?.id || '__none';
+  const entry = heat.find(item => item.id === neighborhoodId) || heat.find(item => item.id === '__none') || heat[0] || {};
+  const base = neighborhoodMapPoint(entry, index, heat.length || 1);
+  const jitter = mapHash(occ.id || occ.protocol || index);
+  return { x: base.x + ((jitter % 37) - 18), y: base.y + (((jitter >> 4) % 31) - 15), approximate: true };
+}
+
+function mapHeatClass(entry = {}, max = 1) {
+  if (!entry.total) return 'none';
+  const ratio = entry.total / Math.max(1, max);
+  if (entry.critical || ratio >= 0.66) return 'high';
+  if (ratio >= 0.33) return 'medium';
+  return 'low';
+}
+
+function renderMapDashboard(rows = [], neighborhoods = [], filters = {}) {
+  const filtered = mapFilteredOccurrences(rows, filters);
+  const heat = mapHeatByNeighborhood(filtered, neighborhoods);
+  const maxHeat = Math.max(1, ...heat.map(item => item.total));
+  const bounds = mapCoordinateBounds(filtered);
+  const withCoordinate = filtered.filter(mapHasCoordinates).length;
+  const critical = filtered.filter(occ => occ.priority === 'CRITICA' && !isClosedStatus(occ.status));
+  const overdue = filtered.filter(isOverdue);
+  const heatTiles = heat.map((entry, index) => {
+    const point = neighborhoodMapPoint(entry, index, heat.length);
+    const label = String(entry.name || '').length > 18 ? `${String(entry.name).slice(0, 17)}...` : String(entry.name || '');
+    return `<g class="map-heat-tile ${mapHeatClass(entry, maxHeat)}">
+      <rect x="${(point.x - 72).toFixed(1)}" y="${(point.y - 42).toFixed(1)}" width="144" height="84" rx="8"></rect>
+      <text x="${point.x.toFixed(1)}" y="${(point.y - 4).toFixed(1)}" text-anchor="middle">${escapeHtml(label)}</text>
+      <text x="${point.x.toFixed(1)}" y="${(point.y + 18).toFixed(1)}" text-anchor="middle">${entry.total} ocorr.</text>
+    </g>`;
+  }).join('');
+  const markers = filtered.map((occ, index) => {
+    const point = occurrenceMapPoint(occ, heat, bounds, index);
+    const cls = occ.priority === 'CRITICA' && !isClosedStatus(occ.status) ? 'danger' : isOverdue(occ) ? 'danger' : occ.priority === 'ALTA' ? 'warning' : 'info';
+    const radius = cls === 'danger' ? 10 : 7;
+    return `<g class="map-marker ${cls} ${point.approximate ? 'approximate' : 'exact'}" transform="translate(${point.x.toFixed(1)} ${point.y.toFixed(1)})">
+      ${cls === 'danger' ? '<circle class="map-marker__pulse" r="18"></circle>' : ''}
+      <circle r="${radius}"></circle>
+      <title>${escapeHtml(`${occ.protocol} - ${occ.title}`)}</title>
+    </g>`;
+  }).join('');
+  const gridLines = Array.from({ length: 7 }, (_, index) => {
+    const x = 40 + index * (640 / 6);
+    const y = 40 + index * (340 / 6);
+    return `<line x1="${x.toFixed(1)}" y1="40" x2="${x.toFixed(1)}" y2="380"></line><line x1="40" y1="${y.toFixed(1)}" x2="680" y2="${y.toFixed(1)}"></line>`;
+  }).join('');
+  const heatList = heat.filter(item => item.total).sort((a, b) => (b.critical - a.critical) || (b.total - a.total)).slice(0, 8);
+  const attention = (critical.length ? critical : filtered.filter(occ => occ.priority === 'ALTA' && !isClosedStatus(occ.status))).slice(0, 8);
+  if (!filtered.length) return empty('Nenhuma ocorrencia encontrada para os filtros do mapa.');
+  return `
+    <div class="map-dashboard">
+      <div class="map-metrics grid-4">
+        <div class="stat-official"><strong>${filtered.length}</strong><span>Ocorrencias no mapa</span></div>
+        <div class="stat-official danger"><strong>${critical.length}</strong><span>Criticas abertas</span></div>
+        <div class="stat-official warning"><strong>${overdue.length}</strong><span>SLA vencido</span></div>
+        <div class="stat-official"><strong>${withCoordinate}</strong><span>Com coordenadas</span></div>
+      </div>
+      <div class="map-workspace">
+        <div class="city-map-shell" aria-label="Mapa operacional de ocorrencias">
+          <svg class="city-map-svg" viewBox="0 0 720 420" role="img">
+            <rect class="map-base" x="0" y="0" width="720" height="420" rx="12"></rect>
+            <g class="map-grid">${gridLines}</g>
+            <g class="map-heat-layer">${heatTiles}</g>
+            <g class="map-marker-layer">${markers}</g>
+          </svg>
+          <div class="map-legend"><span><i class="legend-dot danger"></i>Critica/atrasada</span><span><i class="legend-dot warning"></i>Alta</span><span><i class="legend-dot info"></i>Demais</span><span><i class="legend-dot muted"></i>Aproximada por bairro</span></div>
+        </div>
+        <aside class="map-side-panel">
+          <h3>Calor por bairro/regiao</h3>
+          ${heatList.length ? `<div class="heat-list">${heatList.map(item => `<div><span>${escapeHtml(item.name)}</span><strong>${item.total}</strong><small>${item.critical ? `${item.critical} critica(s)` : `${item.open} aberta(s)`}</small></div>`).join('')}</div>` : empty('Sem concentracao por bairro nos filtros atuais.')}
+          <h3>Ocorrencias criticas no mapa</h3>
+          ${attention.length ? `<div class="map-attention-list">${attention.map(occ => `<button type="button" data-detail-occurrence="${escapeHtml(occ.id || occ.protocol)}"><strong>${escapeHtml(occ.protocol)}</strong><span>${escapeHtml(occ.title)}</span><small>${escapeHtml(occ.neighborhood?.name || 'Sem bairro')} · ${priorityLabels[occ.priority] || occ.priority}</small></button>`).join('')}</div>` : empty('Nenhuma ocorrencia critica ou alta aberta nos filtros atuais.')}
+          <p class="muted-text">A consulta publica nao recebe latitude/longitude. Enderecos publicos sao reduzidos; detalhes sensiveis ficam restritos ao painel interno.</p>
+        </aside>
+      </div>
+    </div>
   `;
 }
 
@@ -1836,6 +2054,16 @@ function bindPanel() {
       toast('Status atualizado.');
       await render();
     }));
+  });
+  const mapFilters = document.querySelector('#mapFilters');
+  if (mapFilters) mapFilters.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(mapFilters).entries());
+    state.mapFilters = normalizeMapFilters(data);
+    const rows = state.panelData.occurrences?.occurrences || state.occurrences || [];
+    const neighborhoods = state.panelData.neighborhoods || [];
+    document.querySelector('#mapDashboard').innerHTML = renderMapDashboard(rows, neighborhoods, state.mapFilters);
+    document.querySelectorAll('#mapDashboard [data-detail-occurrence]').forEach(btn => btn.addEventListener('click', async () => openOccurrenceDetail(btn.dataset.detailOccurrence)));
   });
   const neighForm = document.querySelector('[data-create-neighborhood]');
   if (neighForm) neighForm.addEventListener('submit', async (event) => {

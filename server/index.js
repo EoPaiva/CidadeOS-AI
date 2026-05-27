@@ -76,6 +76,33 @@ function requireRole(res, user, allowedRoles) {
   return true;
 }
 
+function toOptionalCoordinate(value, type = 'lat') {
+  const raw = String(value ?? '').replace(',', '.').trim();
+  if (!raw) return null;
+  const number = Number(raw);
+  const limit = type === 'lng' ? 180 : 90;
+  return Number.isFinite(number) && Math.abs(number) <= limit ? number : null;
+}
+
+function normalizeLocationPayload(input = {}) {
+  const latitude = toOptionalCoordinate(input.latitude, 'lat');
+  const longitude = toOptionalCoordinate(input.longitude, 'lng');
+  const hasPair = latitude !== null && longitude !== null;
+  const wantsPrecise = input.locationPrecision === 'EXATA_CONSENTIDA';
+  const consent = input.locationConsent === true || ['true', 'on', '1', 'yes'].includes(String(input.locationConsent || '').toLowerCase());
+  if (!hasPair) return { latitude: null, longitude: null, locationPrecision: 'APROXIMADA' };
+  const precise = wantsPrecise && consent;
+  return {
+    latitude: Number(latitude.toFixed(precise ? 6 : 3)),
+    longitude: Number(longitude.toFixed(precise ? 6 : 3)),
+    locationPrecision: precise ? 'EXATA_CONSENTIDA' : 'APROXIMADA'
+  };
+}
+
+function safePublicAddress(value = '') {
+  return String(value || '').replace(/\b\d+[a-zA-Z]?\b/g, '').replace(/\s*,\s*/g, ', ').replace(/,\s*$/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function scopeOccurrencesForUser(db, user) {
   let occurrences = db.occurrences;
   if (user.role !== 'SUPER_ADMIN') {
@@ -128,7 +155,7 @@ function publicOccurrence(db, occurrence) {
     department: serialized.department?.name || '',
     priority: serialized.priority,
     status: serialized.status,
-    address: serialized.address,
+    address: safePublicAddress(serialized.address),
     referencePoint: serialized.referencePoint,
     publicMessage: serialized.publicMessage,
     slaDueAt: serialized.slaDueAt,
@@ -859,6 +886,7 @@ async function handleApi(req, res, pathname) {
       const neighborhood = db.neighborhoods.find((item) => item.id === body.neighborhoodId && item.cityId === city.id && item.active) || null;
       const department = findDefaultDepartment(db, category.id);
       const priority = ['BAIXA', 'MEDIA', 'ALTA', 'CRITICA'].includes(body.priority) ? body.priority : (subcategory?.defaultPriority || 'MEDIA');
+      const location = normalizeLocationPayload(body);
 
       let citizenId = null;
       const citizenName = normalizeText(body.citizenName);
@@ -886,8 +914,9 @@ async function handleApi(req, res, pathname) {
         status: 'RECEBIDO',
         address: normalizeText(body.address),
         referencePoint: normalizeText(body.referencePoint),
-        latitude: Number.isFinite(Number(body.latitude)) ? Number(body.latitude) : null,
-        longitude: Number.isFinite(Number(body.longitude)) ? Number(body.longitude) : null,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        locationPrecision: location.locationPrecision,
         publicVisibility: true,
         duplicateOfId: null,
         slaDueAt: computeSlaDue(priority),
@@ -911,7 +940,7 @@ async function handleApi(req, res, pathname) {
         });
       }
 
-      addAudit(db, { cityId: city.id, userId: null, action: 'PUBLIC_OCCURRENCE_CREATED', entityType: 'Occurrence', entityId: occurrence.id, metadata: { protocol: occurrence.protocol } });
+      addAudit(db, { cityId: city.id, userId: null, action: 'PUBLIC_OCCURRENCE_CREATED', entityType: 'Occurrence', entityId: occurrence.id, metadata: { protocol: occurrence.protocol, locationPrecision: location.locationPrecision } });
       return publicOccurrence(db, occurrence);
     });
     return sendJson(res, 201, { ok: true, occurrence: result });
@@ -1694,6 +1723,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`CidadeOS AI Fase 3.1 duplicidade e agrupamento rodando em http://${HOST}:${PORT}`);
+  console.log(`CidadeOS AI Fase 3.2 mapa e geolocalizacao rodando em http://${HOST}:${PORT}`);
   console.log('Contas demo: admin@cidadeos.local / CidadeOS@123 | agente@cidadeos.local / CidadeOS@123');
 });
