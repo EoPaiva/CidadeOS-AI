@@ -122,7 +122,7 @@ Estrutura para zona rural, estradas, pontes, acessos, comunidades afastadas e im
 
 ## Status do desenvolvimento
 
-A versão atual está na **Fase 3.3**, com evidências operacionais, WhatsApp Cloud API, IA assistida opcional, duplicidade assistida, mapa operacional e painel executivo para gestores.
+A versão atual está na **Fase 3.4**, com evidências operacionais, WhatsApp Cloud API, IA assistida opcional, mapa operacional, painel executivo e relatórios exportáveis para prestação de contas.
 
 ### <img src="./docs/assets/svg/cidadeos-bullet-dot.svg" width="14" alt="" /> Já consolidado
 
@@ -141,6 +141,8 @@ duplicidade assistida com candidatos, vínculo confirmado e arquivamento opciona
 mapa operacional interno com filtro por bairro/região, pontos críticos e calor territorial
 geolocalização opcional com privacidade por padrão
 painel executivo com indicadores agregados, tendências, origem, bairros, categorias e setores
+relatórios mensal, por bairro, por setor e de ocorrências críticas
+exportações CSV e PDF sem dados pessoais por padrão
 alertas oficiais
 transparência pública
 api serverless para vercel

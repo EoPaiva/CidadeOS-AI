@@ -872,6 +872,156 @@ function groupCount(items, key, labeler = (value) => value || 'Não informado') 
   return [...map.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
 }
 
+const REPORT_TYPES = {
+  monthly: 'Relatório mensal',
+  neighborhood: 'Relatório por bairro',
+  department: 'Relatório por setor',
+  critical: 'Relatório de ocorrências críticas'
+};
+
+function reportPeriodFilter(rows = [], type = 'monthly', period = '90d', month = monthKey()) {
+  let filtered = rows;
+  if (type === 'monthly') {
+    filtered = rows.filter((item) => monthKey(item.createdAt) === month);
+  } else {
+    const start = executivePeriodStart(period);
+    filtered = rows.filter((item) => !start || new Date(item.createdAt) >= start);
+  }
+  if (type === 'critical') filtered = filtered.filter((item) => item.priority === 'CRITICA');
+  return filtered;
+}
+
+function reportSafeRow(db, item) {
+  return {
+    protocol: item.protocol || '',
+    category: db.categories.find((entry) => entry.id === item.categoryId)?.name || 'Sem categoria',
+    neighborhood: db.neighborhoods.find((entry) => entry.id === item.neighborhoodId)?.name || 'Sem bairro',
+    department: db.departments.find((entry) => entry.id === item.departmentId)?.name || 'Sem setor',
+    status: item.status || '',
+    priority: item.priority || '',
+    origin: item.origin || item.sourceChannel || 'portal',
+    slaStatus: item.slaDueAt && new Date(item.slaDueAt) < new Date() && !['RESOLVIDO', 'CANCELADO', 'ARQUIVADO', 'DUPLICADO'].includes(item.status) ? 'ATRASADA' : 'NO_PRAZO',
+    createdAt: item.createdAt || null,
+    resolvedAt: item.resolvedAt || null
+  };
+}
+
+function buildOperationalReport(db, rows = [], options = {}) {
+  const type = REPORT_TYPES[options.type] ? options.type : 'monthly';
+  const period = options.period || '90d';
+  const month = /^\d{4}-\d{2}$/.test(String(options.month || '')) ? options.month : monthKey();
+  const filtered = reportPeriodFilter(rows, type, period, month);
+  const metrics = executiveMetrics(db, filtered, 'all');
+  const breakdown = type === 'neighborhood' ? metrics.byNeighborhood
+    : type === 'department' ? metrics.byDepartment
+      : type === 'critical' ? metrics.byDepartment
+        : metrics.byCategory;
+  return {
+    type,
+    typeLabel: REPORT_TYPES[type],
+    period,
+    periodLabel: type === 'monthly' ? month : executivePeriodLabel(period),
+    generatedAt: nowIso(),
+    privacyNotice: 'Exportação operacional sem dados pessoais do cidadão.',
+    metrics,
+    breakdown,
+    rows: filtered.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).map((item) => reportSafeRow(db, item))
+  };
+}
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+function reportCsv(report) {
+  const lines = [
+    ['Relatorio', report.typeLabel],
+    ['Periodo', report.periodLabel],
+    ['Gerado em', report.generatedAt],
+    ['Privacidade', report.privacyNotice],
+    [],
+    ['Indicador', 'Valor'],
+    ['Ocorrencias', report.metrics.total],
+    ['Em andamento', report.metrics.open],
+    ['Resolvidas', report.metrics.resolved],
+    ['Atrasadas', report.metrics.overdue],
+    ['Criticas abertas', report.metrics.criticalOpen],
+    ['Taxa de resolucao', `${report.metrics.resolutionRate}%`],
+    [],
+    ['Protocolo', 'Categoria', 'Bairro', 'Setor', 'Situacao', 'Prioridade', 'Origem', 'SLA', 'Criada em', 'Resolvida em'],
+    ...report.rows.map((row) => [row.protocol, row.category, row.neighborhood, row.department, row.status, row.priority, row.origin, row.slaStatus, row.createdAt, row.resolvedAt || ''])
+  ];
+  return `\uFEFF${lines.map((line) => line.map(csvCell).join(',')).join('\r\n')}`;
+}
+
+function pdfSafeText(value) {
+  return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7E]/g, '').replace(/([\\()])/g, '\\$1');
+}
+
+function reportPdfLines(report) {
+  const lines = [
+    'CidadeOS AI - Prestacao de contas',
+    report.typeLabel,
+    `Periodo: ${report.periodLabel}`,
+    `Gerado em: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
+    report.privacyNotice,
+    '',
+    `Ocorrencias: ${report.metrics.total} | Em andamento: ${report.metrics.open} | Resolvidas: ${report.metrics.resolved}`,
+    `Atrasadas: ${report.metrics.overdue} | Criticas abertas: ${report.metrics.criticalOpen} | Resolucao: ${report.metrics.resolutionRate}%`,
+    '',
+    'Principais agrupamentos:',
+    ...report.breakdown.slice(0, 12).map((item) => `- ${item.label}: ${item.value}`),
+    '',
+    'Ocorrencias sem dados pessoais:',
+    ...report.rows.map((row) => `${row.protocol} | ${row.category} | ${row.neighborhood} | ${row.department} | ${row.status} | ${row.priority}`)
+  ];
+  return lines.map((line) => pdfSafeText(line).slice(0, 105));
+}
+
+function simplePdf(lines = []) {
+  const pages = [];
+  for (let index = 0; index < Math.max(1, lines.length); index += 46) pages.push(lines.slice(index, index + 46));
+  const pageIds = pages.map((_, index) => 4 + (index * 2));
+  const objects = {
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`,
+    3: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+  };
+  pages.forEach((pageLines, index) => {
+    const pageId = pageIds[index];
+    const contentId = pageId + 1;
+    const stream = `BT\n/F1 9 Tf\n45 800 Td\n13 TL\n${pageLines.map((line) => `(${line}) Tj T*`).join('\n')}\nET`;
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`;
+    objects[contentId] = `<< /Length ${Buffer.byteLength(stream, 'ascii')} >>\nstream\n${stream}\nendstream`;
+  });
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  const maxId = Math.max(...Object.keys(objects).map(Number));
+  for (let id = 1; id <= maxId; id += 1) {
+    offsets[id] = Buffer.byteLength(pdf, 'ascii');
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(pdf, 'ascii');
+  pdf += `xref\n0 ${maxId + 1}\n0000000000 65535 f \n`;
+  for (let id = 1; id <= maxId; id += 1) pdf += `${String(offsets[id]).padStart(10, '0')} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf, 'ascii');
+}
+
+function sendReportDownload(res, report, format = 'csv') {
+  const safeName = `cidadeos-${report.type}-${report.type === 'monthly' ? report.periodLabel : report.period}`;
+  if (format === 'pdf') {
+    const body = simplePdf(reportPdfLines(report));
+    res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${safeName}.pdf"`, 'Cache-Control': 'no-store' });
+    return res.end(body);
+  }
+  const body = reportCsv(report);
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${safeName}.csv"`, 'Cache-Control': 'no-store' });
+  return res.end(body);
+}
+
 async function handleApi(req, res, pathname) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -882,7 +1032,7 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, {
       ok: true,
       service: 'CidadeOS AI',
-      phase: 'fase-2-0-operacao-real',
+      phase: 'fase-3-4-relatorios-exportacao',
       status: 'online',
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: nowIso()
@@ -1420,11 +1570,36 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === '/api/reports/monthly' && req.method === 'GET') {
+    if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER])) return;
     const db = readDb();
-    const occurrences = scopeOccurrencesForUser(db, user);
     const key = new url.URL(req.url, `http://${req.headers.host}`).searchParams.get('month') || monthKey();
-    const filtered = occurrences.filter((item) => monthKey(item.createdAt) === key);
-    return sendJson(res, 200, { ok: true, month: key, metrics: dashboardMetrics(db, filtered), occurrences: filtered.map((item) => serializeOccurrence(db, item)) });
+    const report = buildOperationalReport(db, scopeOccurrencesForUser(db, user), { type: 'monthly', month: key });
+    return sendJson(res, 200, { ok: true, month: key, metrics: report.metrics, occurrences: report.rows, report });
+  }
+
+  if (pathname === '/api/reports/summary' && req.method === 'GET') {
+    if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER])) return;
+    const db = readDb();
+    const params = new url.URL(req.url, `http://${req.headers.host}`).searchParams;
+    const report = buildOperationalReport(db, scopeOccurrencesForUser(db, user), {
+      type: params.get('type'),
+      period: params.get('period'),
+      month: params.get('month')
+    });
+    return sendJson(res, 200, { ok: true, report });
+  }
+
+  if (pathname === '/api/reports/export' && req.method === 'GET') {
+    if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER])) return;
+    const db = readDb();
+    const params = new url.URL(req.url, `http://${req.headers.host}`).searchParams;
+    const format = params.get('format') === 'pdf' ? 'pdf' : 'csv';
+    const report = buildOperationalReport(db, scopeOccurrencesForUser(db, user), {
+      type: params.get('type'),
+      period: params.get('period'),
+      month: params.get('month')
+    });
+    return sendReportDownload(res, report, format);
   }
 
   if (pathname === '/api/reports/monthly/generate' && req.method === 'POST') {
@@ -1433,7 +1608,7 @@ async function handleApi(req, res, pathname) {
     const generated = transaction((db) => {
       const cityId = user.role === 'SUPER_ADMIN' ? (body.cityId || db.cities[0]?.id) : user.cityId;
       const month = normalizeText(body.month) || monthKey();
-      const occurrences = db.occurrences.filter((item) => item.cityId === cityId && monthKey(item.createdAt) === month);
+      const occurrences = scopeOccurrencesForUser(db, user).filter((item) => item.cityId === cityId && monthKey(item.createdAt) === month);
       const metrics = dashboardMetrics(db, occurrences);
       const report = { id: uuid('report'), cityId, month, year: Number(month.split('-')[0]), summary: `Relatório ${month}: ${metrics.total} ocorrências, ${metrics.resolved} resolvidas, ${metrics.overdue} atrasadas.`, metricsJson: metrics, createdAt: nowIso() };
       db.monthlyReports.push(report);
@@ -1785,6 +1960,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`CidadeOS AI Fase 3.3 painel executivo rodando em http://${HOST}:${PORT}`);
+  console.log(`CidadeOS AI Fase 3.4 relatorios e exportacao rodando em http://${HOST}:${PORT}`);
   console.log('Contas demo: admin@cidadeos.local / CidadeOS@123 | agente@cidadeos.local / CidadeOS@123');
 });

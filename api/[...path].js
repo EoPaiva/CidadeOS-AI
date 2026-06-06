@@ -792,6 +792,123 @@ function executiveMetrics(rows = [], lookups = {}, period = '90d') {
     volumeByPeriod: [...volumeMap.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-12).map(([label, value]) => ({ label, value }))
   };
 }
+const REPORT_TYPES = {
+  monthly: 'Relatório mensal',
+  neighborhood: 'Relatório por bairro',
+  department: 'Relatório por setor',
+  critical: 'Relatório de ocorrências críticas'
+};
+
+function reportMonthKey(value = new Date()) {
+  const date = new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function buildOperationalReport(rows = [], lookups = {}, options = {}) {
+  const type = REPORT_TYPES[options.type] ? options.type : 'monthly';
+  const period = options.period || '90d';
+  const month = /^\d{4}-\d{2}$/.test(String(options.month || '')) ? options.month : reportMonthKey();
+  const start = type === 'monthly' ? null : executivePeriodStart(period);
+  let filtered = rows.filter((row) => type === 'monthly' ? reportMonthKey(row.created_at) === month : (!start || new Date(row.created_at) >= start));
+  if (type === 'critical') filtered = filtered.filter((row) => row.priority === 'critica');
+  const metrics = executiveMetrics(filtered, lookups, 'all');
+  const breakdown = type === 'neighborhood' ? metrics.byNeighborhood
+    : type === 'department' ? metrics.byDepartment
+      : type === 'critical' ? metrics.byDepartment
+        : metrics.byCategory;
+  const findName = (items, id, fallback) => (items || []).find((item) => item.id === id)?.name || fallback;
+  return {
+    type,
+    typeLabel: REPORT_TYPES[type],
+    period,
+    periodLabel: type === 'monthly' ? month : executivePeriodLabel(period),
+    generatedAt: new Date().toISOString(),
+    privacyNotice: 'Exportação operacional sem dados pessoais do cidadão.',
+    metrics,
+    breakdown,
+    rows: filtered.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map((row) => ({
+      protocol: row.protocol || '',
+      category: findName(lookups.categories, row.category_id, 'Sem categoria'),
+      neighborhood: findName(lookups.neighborhoods, row.neighborhood_id, 'Sem bairro'),
+      department: findName(lookups.departments, row.department_id, 'Sem setor'),
+      status: statusFromDb[row.status] || String(row.status || '').toUpperCase(),
+      priority: priorityFromDb[row.priority] || String(row.priority || '').toUpperCase(),
+      origin: row.origin || row.source_channel || 'portal',
+      slaStatus: row.sla_due_at && new Date(row.sla_due_at) < new Date() && !['resolvido', 'cancelado', 'arquivado', 'duplicado'].includes(row.status) ? 'ATRASADA' : 'NO_PRAZO',
+      createdAt: row.created_at || null,
+      resolvedAt: row.resolved_at || null
+    }))
+  };
+}
+
+function csvCell(value) {
+  const text = String(value ?? '');
+  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
+function reportCsv(report) {
+  const lines = [
+    ['Relatorio', report.typeLabel], ['Periodo', report.periodLabel], ['Gerado em', report.generatedAt], ['Privacidade', report.privacyNotice], [],
+    ['Indicador', 'Valor'], ['Ocorrencias', report.metrics.total], ['Em andamento', report.metrics.open], ['Resolvidas', report.metrics.resolved],
+    ['Atrasadas', report.metrics.overdue], ['Criticas abertas', report.metrics.criticalOpen], ['Taxa de resolucao', `${report.metrics.resolutionRate}%`], [],
+    ['Protocolo', 'Categoria', 'Bairro', 'Setor', 'Situacao', 'Prioridade', 'Origem', 'SLA', 'Criada em', 'Resolvida em'],
+    ...report.rows.map((row) => [row.protocol, row.category, row.neighborhood, row.department, row.status, row.priority, row.origin, row.slaStatus, row.createdAt, row.resolvedAt || ''])
+  ];
+  return `\uFEFF${lines.map((line) => line.map(csvCell).join(',')).join('\r\n')}`;
+}
+
+function pdfSafeText(value) {
+  return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7E]/g, '').replace(/([\\()])/g, '\\$1');
+}
+
+function reportPdfLines(report) {
+  return [
+    'CidadeOS AI - Prestacao de contas', report.typeLabel, `Periodo: ${report.periodLabel}`, `Gerado em: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
+    report.privacyNotice, '', `Ocorrencias: ${report.metrics.total} | Em andamento: ${report.metrics.open} | Resolvidas: ${report.metrics.resolved}`,
+    `Atrasadas: ${report.metrics.overdue} | Criticas abertas: ${report.metrics.criticalOpen} | Resolucao: ${report.metrics.resolutionRate}%`, '',
+    'Principais agrupamentos:', ...report.breakdown.slice(0, 12).map((item) => `- ${item.label}: ${item.value}`), '', 'Ocorrencias sem dados pessoais:',
+    ...report.rows.map((row) => `${row.protocol} | ${row.category} | ${row.neighborhood} | ${row.department} | ${row.status} | ${row.priority}`)
+  ].map((line) => pdfSafeText(line).slice(0, 105));
+}
+
+function simplePdf(lines = []) {
+  const pages = [];
+  for (let index = 0; index < Math.max(1, lines.length); index += 46) pages.push(lines.slice(index, index + 46));
+  const pageIds = pages.map((_, index) => 4 + (index * 2));
+  const objects = { 1: '<< /Type /Catalog /Pages 2 0 R >>', 2: `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`, 3: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>' };
+  pages.forEach((pageLines, index) => {
+    const pageId = pageIds[index];
+    const contentId = pageId + 1;
+    const stream = `BT\n/F1 9 Tf\n45 800 Td\n13 TL\n${pageLines.map((line) => `(${line}) Tj T*`).join('\n')}\nET`;
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`;
+    objects[contentId] = `<< /Length ${Buffer.byteLength(stream, 'ascii')} >>\nstream\n${stream}\nendstream`;
+  });
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  const maxId = Math.max(...Object.keys(objects).map(Number));
+  for (let id = 1; id <= maxId; id += 1) {
+    offsets[id] = Buffer.byteLength(pdf, 'ascii');
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(pdf, 'ascii');
+  pdf += `xref\n0 ${maxId + 1}\n0000000000 65535 f \n`;
+  for (let id = 1; id <= maxId; id += 1) pdf += `${String(offsets[id]).padStart(10, '0')} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf, 'ascii');
+}
+
+function sendReportDownload(res, report, format = 'csv') {
+  const safeName = `cidadeos-${report.type}-${report.type === 'monthly' ? report.periodLabel : report.period}`;
+  const isPdf = format === 'pdf';
+  const body = isPdf ? simplePdf(reportPdfLines(report)) : reportCsv(report);
+  res.statusCode = 200;
+  res.setHeader('Content-Type', isPdf ? 'application/pdf' : 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.${isPdf ? 'pdf' : 'csv'}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.end(body);
+}
+
 async function audit(cityId, userId, action, entityType, entityId, metadata = {}) {
   try { await supa('audit_logs', { method: 'POST', body: JSON.stringify([{ city_id: cityId, user_id: userId || null, action, entity_type: entityType, entity_id: entityId || null, metadata }]) }); } catch {}
 }
@@ -1644,10 +1761,40 @@ export default async function handler(req, res) {
       if (key === 'neighborhoods') return ok(res, { neighborhood: neighborhoodFromDb((await supa('neighborhoods', { method: 'POST', body: JSON.stringify([{ city_id: cityNested[1], name: body.name, zone: body.zone || '' }]) }))[0]) });
     }
     if (pathname === '/api/reports/monthly' && req.method === 'GET') {
-      const rows = await supa(`occurrences?city_id=eq.${user.cityId || cityId}&select=*`);
-      return ok(res, { metrics: metrics(rows), occurrences: rows.length ? await serializeRows(rows, user.cityId || cityId) : [] });
+      if (!['SUPER_ADMIN','CITY_ADMIN','DEPARTMENT_MANAGER'].includes(user.role)) return fail(res, 403, 'Acesso restrito aos relatorios executivos.');
+      const targetCityId = user.cityId || cityId;
+      const requestedMonth = new URL(req.url, 'http://localhost').searchParams.get('month') || reportMonthKey();
+      const [rows, categories, neighborhoods, departments] = await Promise.all([
+        supa(`occurrences?city_id=eq.${targetCityId}&select=*&order=created_at.desc`),
+        supa('occurrence_categories?select=id,name').then((result) => result.map(categoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${targetCityId}&select=id,name`).then((result) => result.map(neighborhoodFromDb)),
+        supa(`departments?city_id=eq.${targetCityId}&select=id,name`).then((result) => result.map(departmentFromDb))
+      ]);
+      const scopedRows = user.role === 'DEPARTMENT_MANAGER' ? rows.filter((row) => row.department_id === user.departmentId) : rows;
+      const report = buildOperationalReport(scopedRows, { categories, neighborhoods, departments }, { type: 'monthly', month: requestedMonth });
+      return ok(res, { month: requestedMonth, metrics: report.metrics, occurrences: report.rows, report });
+    }
+    if (['/api/reports/summary', '/api/reports/export'].includes(pathname) && req.method === 'GET') {
+      if (!['SUPER_ADMIN','CITY_ADMIN','DEPARTMENT_MANAGER'].includes(user.role)) return fail(res, 403, 'Acesso restrito aos relatorios executivos.');
+      const targetCityId = user.cityId || cityId;
+      const params = new URL(req.url, 'http://localhost').searchParams;
+      const [rows, categories, neighborhoods, departments] = await Promise.all([
+        supa(`occurrences?city_id=eq.${targetCityId}&select=*&order=created_at.desc`),
+        supa('occurrence_categories?select=id,name').then((result) => result.map(categoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${targetCityId}&select=id,name`).then((result) => result.map(neighborhoodFromDb)),
+        supa(`departments?city_id=eq.${targetCityId}&select=id,name`).then((result) => result.map(departmentFromDb))
+      ]);
+      const scopedRows = user.role === 'DEPARTMENT_MANAGER' ? rows.filter((row) => row.department_id === user.departmentId) : rows;
+      const report = buildOperationalReport(scopedRows, { categories, neighborhoods, departments }, {
+        type: params.get('type'),
+        period: params.get('period'),
+        month: params.get('month')
+      });
+      if (pathname === '/api/reports/export') return sendReportDownload(res, report, params.get('format') === 'pdf' ? 'pdf' : 'csv');
+      return ok(res, { report });
     }
     if (pathname === '/api/reports/monthly/generate' && req.method === 'POST') {
+      if (!['SUPER_ADMIN','CITY_ADMIN','DEPARTMENT_MANAGER'].includes(user.role)) return fail(res, 403, 'Acesso restrito aos relatorios executivos.');
       const now = new Date();
       const report = await supa('monthly_reports', { method: 'POST', body: JSON.stringify([{ city_id: user.cityId || cityId, month: now.getMonth()+1, year: now.getFullYear(), summary: 'Relatório gerado no preview compartilhado.', metrics_json: {} }]) });
       return ok(res, { report: report[0] });
