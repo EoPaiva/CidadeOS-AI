@@ -19,6 +19,7 @@ const state = {
   triageSuggestionModes: {},
   duplicateInsights: {},
   mapFilters: {},
+  executivePeriod: '90d',
   lastProtocol: sessionStorage.getItem('cidadeos_last_protocol') || ''
 };
 
@@ -106,6 +107,10 @@ const operationalPlaybooks = {
 
 function isClosedStatus(status = '') {
   return ['RESOLVIDO', 'CANCELADO', 'DUPLICADO', 'ARQUIVADO'].includes(status);
+}
+
+function canAccessExecutivePanel(user = state.user) {
+  return ['SUPER_ADMIN', 'CITY_ADMIN', 'DEPARTMENT_MANAGER'].includes(user?.role);
 }
 
 function isOverdue(occ = {}) {
@@ -625,6 +630,46 @@ function demoMetrics(db, rows) {
   const countBy = (fn) => Object.entries(rows.reduce((acc, row) => { const k = fn(row) || 'Não informado'; acc[k] = (acc[k] || 0) + 1; return acc; }, {})).map(([label, value]) => ({ label, value }));
   return { total: rows.length, open: open.length, resolved: rows.filter(x => x.status === 'RESOLVIDO').length, overdue: rows.filter(x => x.slaDueAt && new Date(x.slaDueAt) < new Date() && !['RESOLVIDO','CANCELADO','DUPLICADO','ARQUIVADO'].includes(x.status)).length, critical: rows.filter(x => x.priority === 'CRITICA').length, byStatus: countBy(x => x.status), byPriority: countBy(x => x.priority), byDepartment: countBy(x => db.departments.find(d => d.id === x.departmentId)?.name), byNeighborhood: countBy(x => db.neighborhoods.find(n => n.id === x.neighborhoodId)?.name), byCategory: countBy(x => db.categories.find(c => c.id === x.categoryId)?.name) };
 }
+function executivePeriodStart(period = '90d') {
+  if (period === 'all') return null;
+  const days = Number.parseInt(period, 10);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date;
+}
+function executivePeriodLabel(period = '90d') {
+  return ({ '30d': 'Ultimos 30 dias', '90d': 'Ultimos 90 dias', '180d': 'Ultimos 180 dias', '365d': 'Ultimos 12 meses', all: 'Todo o historico' })[period] || 'Ultimos 90 dias';
+}
+function executiveMetrics(db, rows = [], period = '90d') {
+  const start = executivePeriodStart(period);
+  const filtered = rows.filter(row => !start || new Date(row.createdAt) >= start);
+  const open = filtered.filter(row => !isClosedStatus(row.status));
+  const resolved = filtered.filter(row => row.status === 'RESOLVIDO');
+  const countBy = (fn) => Object.entries(filtered.reduce((acc, row) => { const key = fn(row) || 'Nao informado'; acc[key] = (acc[key] || 0) + 1; return acc; }, {})).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  const durations = resolved.filter(row => row.resolvedAt).map(row => Math.max(0, (new Date(row.resolvedAt) - new Date(row.createdAt)) / 86400000));
+  const byCategory = countBy(row => db.categories.find(item => item.id === row.categoryId)?.name);
+  const byNeighborhood = countBy(row => db.neighborhoods.find(item => item.id === row.neighborhoodId)?.name);
+  const byDepartment = countBy(row => db.departments.find(item => item.id === row.departmentId)?.name);
+  const byOrigin = countBy(row => String(row.origin || row.sourceChannel || 'portal').toLowerCase() === 'whatsapp' ? 'WhatsApp' : String(row.origin || row.sourceChannel || 'portal').toLowerCase() === 'painel' ? 'Painel interno' : 'Portal');
+  const monthMap = new Map();
+  filtered.forEach(row => {
+    const date = new Date(row.createdAt);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    monthMap.set(key, (monthMap.get(key) || 0) + 1);
+  });
+  const volumeByPeriod = [...monthMap.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-12).map(([label, value]) => ({ label, value }));
+  return {
+    period, periodLabel: executivePeriodLabel(period), generatedAt: demoNowIso(),
+    total: filtered.length, open: open.length, resolved: resolved.length,
+    overdue: open.filter(row => row.slaDueAt && new Date(row.slaDueAt) < new Date()).length,
+    criticalOpen: open.filter(row => row.priority === 'CRITICA').length,
+    averageResolutionDays: durations.length ? Number((durations.reduce((sum, value) => sum + value, 0) / durations.length).toFixed(1)) : 0,
+    resolutionRate: filtered.length ? Math.round((resolved.length / filtered.length) * 100) : 0,
+    topCategory: byCategory[0] || null, topNeighborhood: byNeighborhood[0] || null, topDepartment: byDepartment[0] || null,
+    byCategory, byNeighborhood, byDepartment, byOrigin, volumeByPeriod
+  };
+}
 function demoSuggestFromMessage(db, message='') {
   const suggestion = buildAssistiveTriageFallback({ text: message, messageBody: message, categories: db.categories, departments: db.departments, subcategories: db.subcategories, neighborhoods: db.neighborhoods, occurrences: db.occurrences, cityId: db.cities[0]?.id });
   return { category: db.categories.find(c => c.id === suggestion.categoryId) || db.categories[0], priority: suggestion.priority, suggestion };
@@ -675,6 +720,11 @@ async function demoRequest(path, options = {}) {
   }
   if (!currentUser && pathname.startsWith('/api/')) throw new Error('Entre no modo demo para acessar o painel.');
   if (pathname === '/api/dashboard/city') return { ok: true, metrics: demoMetrics(db, db.occurrences), recentOccurrences: db.occurrences.slice().reverse().slice(0, 8).map(o => demoSerializeOccurrence(db, o)), previewMode: true };
+  if (pathname === '/api/dashboard/executive') {
+    if (!canAccessExecutivePanel(currentUser)) throw new Error('Acesso restrito ao painel executivo.');
+    const scoped = db.occurrences.filter(row => currentUser.role === 'SUPER_ADMIN' || row.cityId === currentUser.cityId).filter(row => currentUser.role !== 'DEPARTMENT_MANAGER' || row.departmentId === currentUser.departmentId);
+    return { ok: true, metrics: executiveMetrics(db, scoped, url.searchParams.get('period') || '90d'), previewMode: true };
+  }
   if (pathname === '/api/occurrences' && method === 'GET') return { ok: true, occurrences: db.occurrences.slice().reverse().map(o => demoSerializeOccurrence(db, o)), previewMode: true };
   const occDetail = pathname.match(/^\/api\/occurrences\/([^/]+)$/);
   if (occDetail && method === 'GET') {
@@ -1258,6 +1308,7 @@ async function pagePanel() {
   const user = await ensureSession();
   if (!user) return pageLogin();
   await loadPanelData(true);
+  if (state.panelTab === 'executive' && !canAccessExecutivePanel(user)) state.panelTab = 'overview';
   return `
     <div class="notice-strip panel-identity-strip"><span class="panel-identity-mini">${renderCidadeOsLogo({ mode: 'mark', label: 'CidadeOS AI' })}<span><strong>Painel interno:</strong> área operacional para triagem, acompanhamento e gestão das ocorrências registradas.</span></span><span>${escapeHtml(user.name)} · ${escapeHtml(user.role)}</span></div>
     <div class="panel-layout">
@@ -1265,6 +1316,7 @@ async function pagePanel() {
         <div class="panel-sidebar__title">Menu administrativo</div>
         <nav class="panel-tabs" aria-label="Seções do painel">
           ${panelTab('overview', 'Visão geral')}
+          ${canAccessExecutivePanel(user) ? panelTab('executive', 'Painel executivo') : ''}
           ${panelTab('triage', 'SLA e triagem')}
           ${panelTab('occurrences', 'Ocorrências')}
           ${panelTab('map', 'Mapa')}
@@ -1285,6 +1337,7 @@ function panelTab(id, label) {
 }
 
 function renderPanelTab() {
+  if (state.panelTab === 'executive') return panelExecutive();
   if (state.panelTab === 'triage') return panelTriage();
   if (state.panelTab === 'occurrences') return panelOccurrences();
   if (state.panelTab === 'map') return panelMap();
@@ -1299,8 +1352,9 @@ function renderPanelTab() {
 async function loadPanelData(force = false) {
   if (state.panelData && !force) return state.panelData;
   const boot = await loadBootstrap();
-  const [dashboard, occurrences, report, whatsapp] = await Promise.all([
+  const [dashboard, executive, occurrences, report, whatsapp] = await Promise.all([
     request('/api/dashboard/city'),
+    canAccessExecutivePanel() ? request(`/api/dashboard/executive?period=${encodeURIComponent(state.executivePeriod || '90d')}`).catch(() => null) : Promise.resolve(null),
     request('/api/occurrences'),
     request('/api/reports/monthly').catch(() => null),
     request('/api/whatsapp/config').catch(() => ({ channel: null, events: [], messages: [], completeness: { filled: 0, total: 6, percent: 0 } }))
@@ -1322,9 +1376,87 @@ async function loadPanelData(force = false) {
     users = cityUsers.users || [];
   }
   state.occurrences = occurrences.occurrences || [];
-  state.panelData = { dashboard, occurrences, report, audit, departments, neighborhoods, users, whatsapp };
+  state.panelData = { dashboard, executive, occurrences, report, audit, departments, neighborhoods, users, whatsapp };
   state.whatsapp = whatsapp;
   return state.panelData;
+}
+
+function executiveBarChart(title, rows = [], labels = null) {
+  const visible = (rows || []).slice(0, 6);
+  const max = Math.max(1, ...visible.map(item => Number(item.value || 0)));
+  return `
+    <section class="executive-chart">
+      <h3>${escapeHtml(title)}</h3>
+      ${visible.length ? `<div class="executive-bars">${visible.map(item => {
+        const value = Number(item.value || 0);
+        const label = labels?.[item.label] || item.label || 'Nao informado';
+        return `<div class="executive-bar"><div><span>${escapeHtml(label)}</span><strong>${value}</strong></div><div class="executive-bar__track"><i style="width:${Math.max(4, Math.round((value / max) * 100))}%"></i></div></div>`;
+      }).join('')}</div>` : empty('Sem dados agregados para o periodo selecionado.')}
+    </section>
+  `;
+}
+
+function executiveVolumeChart(rows = []) {
+  const visible = (rows || []).slice(-12);
+  const max = Math.max(1, ...visible.map(item => Number(item.value || 0)));
+  if (!visible.length) return empty('Sem volume registrado para o periodo selecionado.');
+  return `<div class="executive-volume" aria-label="Volume de ocorrencias por periodo">${visible.map(item => {
+    const value = Number(item.value || 0);
+    return `<div class="executive-volume__item"><strong>${value}</strong><div><i style="height:${Math.max(8, Math.round((value / max) * 100))}%"></i></div><span>${escapeHtml(item.label)}</span></div>`;
+  }).join('')}</div>`;
+}
+
+function executiveTopInsight(label, item, fallback) {
+  return `<div class="executive-insight"><span>${escapeHtml(label)}</span><strong>${escapeHtml(item?.label || fallback)}</strong><small>${item?.value ? `${item.value} ocorrencia(s) no periodo` : 'Sem dados suficientes'}</small></div>`;
+}
+
+function panelExecutive() {
+  const m = state.panelData.executive?.metrics;
+  if (!m) return `<section class="gov-section"><div class="gov-section__header"><div><h1>Painel executivo</h1><p>Indicadores agregados para gestao publica.</p></div></div><div class="gov-section__body">${empty('Nao foi possivel carregar os indicadores executivos para este perfil.')}</div></section>`;
+  return `
+    <section class="gov-section executive-header">
+      <div class="gov-section__header"><div><span class="section-kicker">Gestao publica orientada por dados</span><h1>Painel executivo</h1><p>Visao agregada para acompanhar demanda, resposta operacional e concentracao territorial sem expor dados pessoais.</p></div><button class="gov-button small" data-refresh-panel>Atualizar</button></div>
+      <div class="gov-section__body">
+        <form id="executiveFilters" class="executive-filter">
+          <div class="gov-field"><label>Periodo analisado</label><select name="period">
+            <option value="30d" ${m.period === '30d' ? 'selected' : ''}>Ultimos 30 dias</option>
+            <option value="90d" ${m.period === '90d' ? 'selected' : ''}>Ultimos 90 dias</option>
+            <option value="180d" ${m.period === '180d' ? 'selected' : ''}>Ultimos 180 dias</option>
+            <option value="365d" ${m.period === '365d' ? 'selected' : ''}>Ultimos 12 meses</option>
+            <option value="all" ${m.period === 'all' ? 'selected' : ''}>Todo o historico</option>
+          </select></div>
+          <button class="gov-button primary" type="submit">Aplicar periodo</button>
+          <span class="muted-text">Dados agregados em ${escapeHtml(m.periodLabel || '')}. Atualizado em ${fmtDate(m.generatedAt)}.</span>
+        </form>
+      </div>
+    </section>
+    <section class="executive-kpis">
+      <div class="stat-official"><strong>${m.total}</strong><span>Ocorrencias recebidas</span></div>
+      <div class="stat-official warning"><strong>${m.open}</strong><span>Abertas</span></div>
+      <div class="stat-official success"><strong>${m.resolved}</strong><span>Resolvidas</span></div>
+      <div class="stat-official danger"><strong>${m.overdue}</strong><span>Em atraso</span></div>
+      <div class="stat-official danger"><strong>${m.criticalOpen}</strong><span>Criticas abertas</span></div>
+      <div class="stat-official"><strong>${m.averageResolutionDays}d</strong><span>Tempo medio de resolucao</span></div>
+    </section>
+    <section class="gov-section">
+      <div class="gov-section__header"><div><h2>Leitura executiva</h2><p>Indicadores para priorizacao de recursos e acompanhamento da capacidade de resposta.</p></div><span class="badge ${m.resolutionRate >= 60 ? 'success' : m.resolutionRate >= 30 ? 'warning' : 'danger'}">${m.resolutionRate}% resolvidas</span></div>
+      <div class="gov-section__body executive-insights">
+        ${executiveTopInsight('Categoria com maior demanda', m.topCategory, 'Sem categoria dominante')}
+        ${executiveTopInsight('Bairro mais citado', m.topNeighborhood, 'Sem bairro dominante')}
+        ${executiveTopInsight('Setor mais acionado', m.topDepartment, 'Sem setor dominante')}
+      </div>
+    </section>
+    <section class="gov-section">
+      <div class="gov-section__header"><div><h2>Volume por periodo</h2><p>Evolucao mensal das ocorrencias recebidas.</p></div></div>
+      <div class="gov-section__body">${executiveVolumeChart(m.volumeByPeriod)}</div>
+    </section>
+    <section class="executive-chart-grid">
+      ${executiveBarChart('Origem das ocorrencias', m.byOrigin)}
+      ${executiveBarChart('Categorias com maior demanda', m.byCategory)}
+      ${executiveBarChart('Bairros mais citados', m.byNeighborhood)}
+      ${executiveBarChart('Setores mais acionados', m.byDepartment)}
+    </section>
+  `;
 }
 
 function panelOverview() {
@@ -2039,6 +2171,14 @@ function bindPanel() {
     await render();
   }));
   document.querySelectorAll('[data-print-page]').forEach(btn => btn.addEventListener('click', () => window.print()));
+  const executiveFilters = document.querySelector('#executiveFilters');
+  if (executiveFilters) executiveFilters.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    state.executivePeriod = executiveFilters.period.value || '90d';
+    state.panelData = null;
+    toast('Periodo executivo atualizado.');
+    await render();
+  });
   const filters = document.querySelector('#occurrenceFilters');
   if (filters) filters.addEventListener('submit', async (event) => {
     event.preventDefault();

@@ -737,6 +737,61 @@ function metrics(rows) {
   const openStatuses = new Set(['recebido','em_analise','encaminhado','em_execucao','aguardando_terceiro','aguardando_cidadao']);
   return { totalOccurrences: rows.length, openOccurrences: rows.filter(o => openStatuses.has(o.status)).length, resolvedOccurrences: rows.filter(o => o.status === 'resolvido').length, criticalOccurrences: rows.filter(o => o.priority === 'critica').length, overdueOccurrences: rows.filter(o => o.sla_due_at && new Date(o.sla_due_at) < new Date() && !['resolvido','cancelado','arquivado','duplicado'].includes(o.status)).length };
 }
+function executivePeriodStart(period = '90d') {
+  if (period === 'all') return null;
+  const days = Number.parseInt(period, 10);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date;
+}
+function executivePeriodLabel(period = '90d') {
+  return ({ '30d': 'Ultimos 30 dias', '90d': 'Ultimos 90 dias', '180d': 'Ultimos 180 dias', '365d': 'Ultimos 12 meses', all: 'Todo o historico' })[period] || 'Ultimos 90 dias';
+}
+function executiveMetrics(rows = [], lookups = {}, period = '90d') {
+  const start = executivePeriodStart(period);
+  const filtered = rows.filter(row => !start || new Date(row.created_at) >= start);
+  const openStatuses = new Set(['recebido','em_analise','encaminhado','em_execucao','aguardando_terceiro','aguardando_cidadao']);
+  const openRows = filtered.filter(row => openStatuses.has(row.status));
+  const resolvedRows = filtered.filter(row => row.status === 'resolvido');
+  const group = (getter) => [...filtered.reduce((map, row) => {
+    const label = getter(row) || 'Nao informado';
+    map.set(label, (map.get(label) || 0) + 1);
+    return map;
+  }, new Map()).entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  const findName = (items, id, fallback) => (items || []).find(item => item.id === id)?.name || fallback;
+  const byCategory = group(row => findName(lookups.categories, row.category_id, 'Sem categoria'));
+  const byNeighborhood = group(row => findName(lookups.neighborhoods, row.neighborhood_id, 'Sem bairro'));
+  const byDepartment = group(row => findName(lookups.departments, row.department_id, 'Sem departamento'));
+  const byOrigin = group(row => String(row.origin || row.source_channel || 'portal').toLowerCase().includes('whatsapp') ? 'WhatsApp' : String(row.origin || row.source_channel || 'portal').toLowerCase().includes('painel') ? 'Painel interno' : 'Portal');
+  const durations = resolvedRows.filter(row => row.resolved_at).map(row => Math.max(0, (new Date(row.resolved_at) - new Date(row.created_at)) / 86400000));
+  const volumeMap = new Map();
+  filtered.forEach(row => {
+    const date = new Date(row.created_at);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    volumeMap.set(key, (volumeMap.get(key) || 0) + 1);
+  });
+  return {
+    period,
+    periodLabel: executivePeriodLabel(period),
+    generatedAt: new Date().toISOString(),
+    total: filtered.length,
+    open: openRows.length,
+    resolved: resolvedRows.length,
+    overdue: openRows.filter(row => row.sla_due_at && new Date(row.sla_due_at) < new Date()).length,
+    criticalOpen: openRows.filter(row => row.priority === 'critica').length,
+    averageResolutionDays: durations.length ? Number((durations.reduce((sum, value) => sum + value, 0) / durations.length).toFixed(1)) : 0,
+    resolutionRate: filtered.length ? Math.round((resolvedRows.length / filtered.length) * 100) : 0,
+    topCategory: byCategory[0] || null,
+    topNeighborhood: byNeighborhood[0] || null,
+    topDepartment: byDepartment[0] || null,
+    byCategory,
+    byNeighborhood,
+    byDepartment,
+    byOrigin,
+    volumeByPeriod: [...volumeMap.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-12).map(([label, value]) => ({ label, value }))
+  };
+}
 async function audit(cityId, userId, action, entityType, entityId, metadata = {}) {
   try { await supa('audit_logs', { method: 'POST', body: JSON.stringify([{ city_id: cityId, user_id: userId || null, action, entity_type: entityType, entity_id: entityId || null, metadata }]) }); } catch {}
 }
@@ -1360,6 +1415,19 @@ export default async function handler(req, res) {
       const recentRows = rows.slice(0, 8);
       const recentOccurrences = recentRows.length ? await serializeRows(recentRows, user.cityId || cityId) : [];
       return ok(res, { metrics: metrics(rows), recentOccurrences });
+    }
+    if (pathname === '/api/dashboard/executive' && req.method === 'GET') {
+      if (!['SUPER_ADMIN','CITY_ADMIN','DEPARTMENT_MANAGER'].includes(user.role)) return fail(res, 403, 'Acesso restrito ao painel executivo.');
+      const targetCityId = user.cityId || cityId;
+      const period = new URL(req.url, 'http://localhost').searchParams.get('period') || '90d';
+      const [rows, categories, neighborhoods, departments] = await Promise.all([
+        supa(`occurrences?city_id=eq.${targetCityId}&select=*&order=created_at.desc`),
+        supa('occurrence_categories?select=id,name').then(result => result.map(categoryFromDb)),
+        supa(`neighborhoods?city_id=eq.${targetCityId}&select=id,name`).then(result => result.map(neighborhoodFromDb)),
+        supa(`departments?city_id=eq.${targetCityId}&select=id,name`).then(result => result.map(departmentFromDb))
+      ]);
+      const scopedRows = user.role === 'DEPARTMENT_MANAGER' ? rows.filter(row => row.department_id === user.departmentId) : rows;
+      return ok(res, { metrics: executiveMetrics(scopedRows, { categories, neighborhoods, departments }, period) });
     }
     if (pathname === '/api/occurrences' && req.method === 'GET') {
       const rows = await supa(`occurrences?city_id=eq.${user.cityId || cityId}&select=*&order=created_at.desc`);

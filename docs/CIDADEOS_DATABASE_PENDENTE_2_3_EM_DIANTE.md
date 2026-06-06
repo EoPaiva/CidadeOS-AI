@@ -123,3 +123,15 @@ A Fase 3.2 reutiliza campos e tabelas ja previstos:
 - `audit_logs` para registrar a precisao usada na abertura publica.
 
 Regra de privacidade aplicada na aplicacao: coordenada precisa so e salva quando o morador/operador marcar consentimento explicito. Sem consentimento, latitude e longitude sao arredondadas para precisao aproximada antes do armazenamento. A consulta publica nao expõe latitude/longitude e reduz numeros de endereco; detalhes sensiveis ficam restritos ao painel interno.
+
+## Fase 3.3 - Painel executivo
+
+Sem SQL obrigatorio novo.
+
+O painel executivo calcula indicadores agregados em tempo de consulta usando campos e tabelas ja existentes:
+
+- `occurrences.status`, `priority`, `sla_due_at`, `created_at` e `resolved_at`;
+- `occurrences.category_id`, `neighborhood_id`, `department_id`, `origin` e `source_channel`;
+- `occurrence_categories`, `neighborhoods` e `departments` para rotulos agregados.
+
+Nenhum dado pessoal do cidadao e retornado pela rota executiva. Os indicadores sao filtrados pela cidade e pelas permissoes do perfil autenticado.
