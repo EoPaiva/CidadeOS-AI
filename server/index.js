@@ -808,6 +808,60 @@ function dashboardMetrics(db, occurrences) {
   return { total, open, resolved, critical, overdue, averageResolutionDays, byStatus, byPriority, byNeighborhood, byCategory, byDepartment };
 }
 
+function executivePeriodStart(period = '90d') {
+  if (period === 'all') return null;
+  const days = Number.parseInt(period, 10);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date;
+}
+
+function executivePeriodLabel(period = '90d') {
+  return ({ '30d': 'Ultimos 30 dias', '90d': 'Ultimos 90 dias', '180d': 'Ultimos 180 dias', '365d': 'Ultimos 12 meses', all: 'Todo o historico' })[period] || 'Ultimos 90 dias';
+}
+
+function executiveMetrics(db, occurrences = [], period = '90d') {
+  const start = executivePeriodStart(period);
+  const filtered = occurrences.filter((item) => !start || new Date(item.createdAt) >= start);
+  const openRows = filtered.filter((item) => !['RESOLVIDO', 'CANCELADO', 'ARQUIVADO', 'DUPLICADO'].includes(item.status));
+  const resolvedRows = filtered.filter((item) => item.status === 'RESOLVIDO');
+  const byCategory = groupCount(filtered, 'categoryId', (id) => db.categories.find((item) => item.id === id)?.name || 'Sem categoria');
+  const byNeighborhood = groupCount(filtered, 'neighborhoodId', (id) => db.neighborhoods.find((item) => item.id === id)?.name || 'Sem bairro');
+  const byDepartment = groupCount(filtered, 'departmentId', (id) => db.departments.find((item) => item.id === id)?.name || 'Sem departamento');
+  const byOriginMap = new Map();
+  filtered.forEach((item) => {
+    const raw = normalizeText(item.origin || item.sourceChannel || 'portal').toLowerCase();
+    const label = raw.includes('whatsapp') ? 'WhatsApp' : raw.includes('painel') ? 'Painel interno' : 'Portal';
+    byOriginMap.set(label, (byOriginMap.get(label) || 0) + 1);
+  });
+  const byOrigin = [...byOriginMap.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  const resolvedDurations = resolvedRows.filter((item) => item.resolvedAt).map((item) => daysBetween(item.createdAt, item.resolvedAt));
+  const volumeMap = new Map();
+  filtered.forEach((item) => volumeMap.set(monthKey(item.createdAt), (volumeMap.get(monthKey(item.createdAt)) || 0) + 1));
+  const volumeByPeriod = [...volumeMap.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-12).map(([label, value]) => ({ label, value }));
+  return {
+    period,
+    periodLabel: executivePeriodLabel(period),
+    generatedAt: nowIso(),
+    total: filtered.length,
+    open: openRows.length,
+    resolved: resolvedRows.length,
+    overdue: openRows.filter((item) => item.slaDueAt && new Date(item.slaDueAt) < new Date()).length,
+    criticalOpen: openRows.filter((item) => item.priority === 'CRITICA').length,
+    averageResolutionDays: resolvedDurations.length ? Number((resolvedDurations.reduce((sum, value) => sum + value, 0) / resolvedDurations.length).toFixed(1)) : 0,
+    resolutionRate: filtered.length ? Math.round((resolvedRows.length / filtered.length) * 100) : 0,
+    topCategory: byCategory[0] || null,
+    topNeighborhood: byNeighborhood[0] || null,
+    topDepartment: byDepartment[0] || null,
+    byCategory,
+    byNeighborhood,
+    byDepartment,
+    byOrigin,
+    volumeByPeriod
+  };
+}
+
 function groupCount(items, key, labeler = (value) => value || 'Não informado') {
   const map = new Map();
   for (const item of items) {
@@ -1334,6 +1388,14 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, metrics: dashboardMetrics(db, occurrences), recentOccurrences: occurrences.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 8).map((item) => serializeOccurrence(db, item)) });
   }
 
+  if (pathname === '/api/dashboard/executive' && req.method === 'GET') {
+    if (!requireRole(res, user, [ROLES.SUPER_ADMIN, ROLES.CITY_ADMIN, ROLES.DEPARTMENT_MANAGER])) return;
+    const db = readDb();
+    const period = new url.URL(req.url, `http://${req.headers.host}`).searchParams.get('period') || '90d';
+    const occurrences = scopeOccurrencesForUser(db, user);
+    return sendJson(res, 200, { ok: true, metrics: executiveMetrics(db, occurrences, period) });
+  }
+
   if (pathname === '/api/dashboard/agent' && req.method === 'GET') {
     const db = readDb();
     const occurrences = scopeOccurrencesForUser(db, user);
@@ -1723,6 +1785,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`CidadeOS AI Fase 3.2 mapa e geolocalizacao rodando em http://${HOST}:${PORT}`);
+  console.log(`CidadeOS AI Fase 3.3 painel executivo rodando em http://${HOST}:${PORT}`);
   console.log('Contas demo: admin@cidadeos.local / CidadeOS@123 | agente@cidadeos.local / CidadeOS@123');
 });

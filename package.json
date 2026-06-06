@@ -1,7 +1,7 @@
 {
-  "name": "cidadeos-ai-fase3-2-mapa-geolocalizacao",
-  "version": "3.2.0",
-  "description": "CidadeOS AI - Fase 3.2 com mapa operacional, geolocalizacao opcional e calor por regiao.",
+  "name": "cidadeos-ai-fase3-3-painel-executivo",
+  "version": "3.3.0",
+  "description": "CidadeOS AI - Fase 3.3 com painel executivo, indicadores agregados e tendencias operacionais.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {
