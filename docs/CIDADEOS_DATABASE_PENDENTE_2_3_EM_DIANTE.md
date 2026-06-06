@@ -135,3 +135,15 @@ O painel executivo calcula indicadores agregados em tempo de consulta usando cam
 - `occurrence_categories`, `neighborhoods` e `departments` para rotulos agregados.
 
 Nenhum dado pessoal do cidadao e retornado pela rota executiva. Os indicadores sao filtrados pela cidade e pelas permissoes do perfil autenticado.
+
+## Fase 3.4 - Relatorios PDF e exportacao
+
+Sem SQL obrigatorio novo.
+
+Os relatorios mensal, por bairro, por setor e de ocorrencias criticas sao calculados em tempo de consulta usando estruturas existentes:
+
+- `occurrences` para protocolo, categoria, bairro, setor, situacao, prioridade, origem, SLA e datas operacionais;
+- `occurrence_categories`, `neighborhoods` e `departments` para rotulos;
+- permissoes atuais para limitar cidade e setor do gestor.
+
+CSV e PDF nao incluem nome, telefone, e-mail, descricao livre, endereco detalhado ou outros dados pessoais do cidadao por padrao. Nenhuma exportacao e persistida no banco.

@@ -1,7 +1,7 @@
 {
-  "name": "cidadeos-ai-fase3-3-painel-executivo",
-  "version": "3.3.0",
-  "description": "CidadeOS AI - Fase 3.3 com painel executivo, indicadores agregados e tendencias operacionais.",
+  "name": "cidadeos-ai-fase3-4-relatorios-exportacao",
+  "version": "3.4.0",
+  "description": "CidadeOS AI - Fase 3.4 com relatorios operacionais e exportacoes CSV e PDF sem dados pessoais.",
   "type": "module",
   "main": "server/index.js",
   "scripts": {

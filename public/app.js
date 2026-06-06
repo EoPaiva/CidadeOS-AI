@@ -20,6 +20,9 @@ const state = {
   duplicateInsights: {},
   mapFilters: {},
   executivePeriod: '90d',
+  reportType: 'monthly',
+  reportPeriod: '90d',
+  reportMonth: new Date().toISOString().slice(0, 7),
   lastProtocol: sessionStorage.getItem('cidadeos_last_protocol') || ''
 };
 
@@ -670,6 +673,145 @@ function executiveMetrics(db, rows = [], period = '90d') {
     byCategory, byNeighborhood, byDepartment, byOrigin, volumeByPeriod
   };
 }
+
+const reportTypeLabels = {
+  monthly: 'Relatório mensal',
+  neighborhood: 'Relatório por bairro',
+  department: 'Relatório por setor',
+  critical: 'Relatório de ocorrências críticas'
+};
+
+function reportMonthKey(value = new Date()) {
+  const date = new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function reportSafeRow(db, row) {
+  return {
+    protocol: row.protocol || '',
+    category: db.categories.find(item => item.id === row.categoryId)?.name || 'Sem categoria',
+    neighborhood: db.neighborhoods.find(item => item.id === row.neighborhoodId)?.name || 'Sem bairro',
+    department: db.departments.find(item => item.id === row.departmentId)?.name || 'Sem setor',
+    status: row.status || '',
+    priority: row.priority || '',
+    origin: row.origin || row.sourceChannel || 'portal',
+    slaStatus: isOverdue(row) ? 'ATRASADA' : 'NO_PRAZO',
+    createdAt: row.createdAt || null,
+    resolvedAt: row.resolvedAt || null
+  };
+}
+
+function buildDemoOperationalReport(db, rows = [], options = {}) {
+  const type = reportTypeLabels[options.type] ? options.type : 'monthly';
+  const period = options.period || '90d';
+  const month = /^\d{4}-\d{2}$/.test(String(options.month || '')) ? options.month : reportMonthKey();
+  const start = type === 'monthly' ? null : executivePeriodStart(period);
+  let filtered = rows.filter(row => type === 'monthly' ? reportMonthKey(row.createdAt) === month : (!start || new Date(row.createdAt) >= start));
+  if (type === 'critical') filtered = filtered.filter(row => row.priority === 'CRITICA');
+  const metrics = executiveMetrics(db, filtered, 'all');
+  const breakdown = type === 'neighborhood' ? metrics.byNeighborhood : type === 'department' || type === 'critical' ? metrics.byDepartment : metrics.byCategory;
+  return {
+    type,
+    typeLabel: reportTypeLabels[type],
+    period,
+    periodLabel: type === 'monthly' ? month : executivePeriodLabel(period),
+    generatedAt: demoNowIso(),
+    privacyNotice: 'Exportação operacional sem dados pessoais do cidadão.',
+    metrics,
+    breakdown,
+    rows: filtered.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).map(row => reportSafeRow(db, row))
+  };
+}
+
+function reportCsv(report) {
+  const cell = value => {
+    const text = String(value ?? '');
+    const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
+    return `"${safe.replaceAll('"', '""')}"`;
+  };
+  const lines = [
+    ['Relatorio', report.typeLabel], ['Periodo', report.periodLabel], ['Gerado em', report.generatedAt], ['Privacidade', report.privacyNotice], [],
+    ['Indicador', 'Valor'], ['Ocorrencias', report.metrics.total], ['Em andamento', report.metrics.open], ['Resolvidas', report.metrics.resolved],
+    ['Atrasadas', report.metrics.overdue], ['Criticas abertas', report.metrics.criticalOpen], ['Taxa de resolucao', `${report.metrics.resolutionRate}%`], [],
+    ['Protocolo', 'Categoria', 'Bairro', 'Setor', 'Situacao', 'Prioridade', 'Origem', 'SLA', 'Criada em', 'Resolvida em'],
+    ...report.rows.map(row => [row.protocol, row.category, row.neighborhood, row.department, row.status, row.priority, row.origin, row.slaStatus, row.createdAt, row.resolvedAt || ''])
+  ];
+  return `\uFEFF${lines.map(line => line.map(cell).join(',')).join('\r\n')}`;
+}
+
+function reportPdfLines(report) {
+  const clean = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7E]/g, '').replace(/([\\()])/g, '\\$1').slice(0, 105);
+  return [
+    'CidadeOS AI - Prestacao de contas', report.typeLabel, `Periodo: ${report.periodLabel}`, `Gerado em: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`,
+    report.privacyNotice, '', `Ocorrencias: ${report.metrics.total} | Em andamento: ${report.metrics.open} | Resolvidas: ${report.metrics.resolved}`,
+    `Atrasadas: ${report.metrics.overdue} | Criticas abertas: ${report.metrics.criticalOpen} | Resolucao: ${report.metrics.resolutionRate}%`, '',
+    'Principais agrupamentos:', ...report.breakdown.slice(0, 12).map(item => `- ${item.label}: ${item.value}`), '', 'Ocorrencias sem dados pessoais:',
+    ...report.rows.map(row => `${row.protocol} | ${row.category} | ${row.neighborhood} | ${row.department} | ${row.status} | ${row.priority}`)
+  ].map(clean);
+}
+
+function simplePdfBlob(report) {
+  const lines = reportPdfLines(report);
+  const pages = [];
+  for (let index = 0; index < Math.max(1, lines.length); index += 46) pages.push(lines.slice(index, index + 46));
+  const pageIds = pages.map((_, index) => 4 + (index * 2));
+  const objects = { 1: '<< /Type /Catalog /Pages 2 0 R >>', 2: `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`, 3: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>' };
+  pages.forEach((pageLines, index) => {
+    const pageId = pageIds[index];
+    const contentId = pageId + 1;
+    const stream = `BT\n/F1 9 Tf\n45 800 Td\n13 TL\n${pageLines.map(line => `(${line}) Tj T*`).join('\n')}\nET`;
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`;
+    objects[contentId] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  });
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  const maxId = Math.max(...Object.keys(objects).map(Number));
+  for (let id = 1; id <= maxId; id += 1) {
+    offsets[id] = pdf.length;
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xref = pdf.length;
+  pdf += `xref\n0 ${maxId + 1}\n0000000000 65535 f \n`;
+  for (let id = 1; id <= maxId; id += 1) pdf += `${String(offsets[id]).padStart(10, '0')} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new Blob([new TextEncoder().encode(pdf)], { type: 'application/pdf' });
+}
+
+function saveBlob(blob, fileName) {
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
+async function downloadOperationalReport(format = 'csv') {
+  const params = new URLSearchParams({ type: state.reportType, period: state.reportPeriod, month: state.reportMonth, format });
+  const headers = {};
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const forceDemo = localStorage.getItem('cidadeos_force_demo_mode') === '1';
+  if (!forceDemo) {
+    try {
+      const response = await fetch(`${API}/api/reports/export?${params}`, { headers });
+      if (!response.ok) throw new Error('Exportacao indisponivel.');
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') || '';
+      const fileName = disposition.match(/filename="([^"]+)"/)?.[1] || `cidadeos-${state.reportType}.${format}`;
+      saveBlob(blob, fileName);
+      return;
+    } catch (error) {
+      if (!ONLINE_PREVIEW_MODE) throw error;
+    }
+  }
+  const data = await demoRequest(`/api/reports/summary?${params}`);
+  const report = data.report;
+  const blob = format === 'pdf' ? simplePdfBlob(report) : new Blob([reportCsv(report)], { type: 'text/csv;charset=utf-8' });
+  saveBlob(blob, `cidadeos-${report.type}-${report.periodLabel}.${format}`);
+}
+
 function demoSuggestFromMessage(db, message='') {
   const suggestion = buildAssistiveTriageFallback({ text: message, messageBody: message, categories: db.categories, departments: db.departments, subcategories: db.subcategories, neighborhoods: db.neighborhoods, occurrences: db.occurrences, cityId: db.cities[0]?.id });
   return { category: db.categories.find(c => c.id === suggestion.categoryId) || db.categories[0], priority: suggestion.priority, suggestion };
@@ -800,8 +942,18 @@ async function demoRequest(path, options = {}) {
   const cityNested = pathname.match(/^\/api\/cities\/([^/]+)\/(departments|neighborhoods|users)$/);
   if (cityNested && method === 'GET') { const key = cityNested[2]; return { ok: true, [key]: db[key].filter(x => !x.cityId || x.cityId === cityNested[1]).map(x => key === 'users' ? demoPublicUser(x) : x), previewMode: true }; }
   if (cityNested && method === 'POST') { const key = cityNested[2]; const entry = { id: demoUuid(key.slice(0,-1)), cityId: cityNested[1], name: body.name || body.email || 'Novo cadastro', description: body.description || '', active: true, createdAt: demoNowIso(), updatedAt: demoNowIso() }; db[key].push(entry); return save({ ok: true, [key.slice(0,-1)]: entry, previewMode: true }); }
-  if (pathname === '/api/reports/monthly') return { ok: true, metrics: demoMetrics(db, db.occurrences), occurrences: db.occurrences.map(o => demoSerializeOccurrence(db, o)), previewMode: true };
-  if (pathname === '/api/reports/monthly/generate' && method === 'POST') { db.monthlyReports.push({ id: demoUuid('rep'), cityId: db.cities[0].id, month: new Date().getMonth()+1, year: new Date().getFullYear(), createdAt: demoNowIso() }); return save({ ok: true, report: db.monthlyReports.at(-1), previewMode: true }); }
+  if (pathname === '/api/reports/summary' && method === 'GET') {
+    if (!canAccessExecutivePanel(currentUser)) throw new Error('Acesso restrito aos relatorios executivos.');
+    const scoped = db.occurrences.filter(row => currentUser.role === 'SUPER_ADMIN' || row.cityId === currentUser.cityId).filter(row => currentUser.role !== 'DEPARTMENT_MANAGER' || row.departmentId === currentUser.departmentId);
+    return { ok: true, report: buildDemoOperationalReport(db, scoped, { type: url.searchParams.get('type'), period: url.searchParams.get('period'), month: url.searchParams.get('month') }), previewMode: true };
+  }
+  if (pathname === '/api/reports/monthly') {
+    if (!canAccessExecutivePanel(currentUser)) throw new Error('Acesso restrito aos relatorios executivos.');
+    const scoped = db.occurrences.filter(row => currentUser.role === 'SUPER_ADMIN' || row.cityId === currentUser.cityId).filter(row => currentUser.role !== 'DEPARTMENT_MANAGER' || row.departmentId === currentUser.departmentId);
+    const report = buildDemoOperationalReport(db, scoped, { type: 'monthly', month: url.searchParams.get('month') });
+    return { ok: true, month: report.periodLabel, metrics: report.metrics, occurrences: report.rows, report, previewMode: true };
+  }
+  if (pathname === '/api/reports/monthly/generate' && method === 'POST') { if (!canAccessExecutivePanel(currentUser)) throw new Error('Acesso restrito aos relatorios executivos.'); db.monthlyReports.push({ id: demoUuid('rep'), cityId: db.cities[0].id, month: new Date().getMonth()+1, year: new Date().getFullYear(), createdAt: demoNowIso() }); return save({ ok: true, report: db.monthlyReports.at(-1), previewMode: true }); }
   if (pathname === '/api/audit-logs') return { ok: true, auditLogs: db.auditLogs.slice().reverse(), previewMode: true };
   if (pathname === '/api/whatsapp/config' && method === 'GET') return { ok: true, channel: db.whatsappChannels[0], events: db.whatsappWebhookEvents, messages: db.whatsappMessages.map(m => ({ ...m, occurrence: db.occurrences.find(o => o.id === m.occurrenceId) ? demoSerializeOccurrence(db, db.occurrences.find(o => o.id === m.occurrenceId)) : null })), triage: { waitingInfo: db.whatsappMessages.filter(m => m.status === 'AGUARDANDO_INFORMACOES').length }, completeness: { filled: 6, total: 6, percent: 100 }, previewMode: true };
   if (pathname === '/api/whatsapp/config' && method === 'PUT') { db.whatsappChannels[0] = { ...db.whatsappChannels[0], ...body, cityId: db.cities[0].id, updatedAt: demoNowIso(), connectionStatus: 'MODO_DEMO_ONLINE' }; return save({ ok: true, channel: db.whatsappChannels[0], previewMode: true }); }
@@ -1309,6 +1461,7 @@ async function pagePanel() {
   if (!user) return pageLogin();
   await loadPanelData(true);
   if (state.panelTab === 'executive' && !canAccessExecutivePanel(user)) state.panelTab = 'overview';
+  if (state.panelTab === 'reports' && !canAccessExecutivePanel(user)) state.panelTab = 'overview';
   return `
     <div class="notice-strip panel-identity-strip"><span class="panel-identity-mini">${renderCidadeOsLogo({ mode: 'mark', label: 'CidadeOS AI' })}<span><strong>Painel interno:</strong> área operacional para triagem, acompanhamento e gestão das ocorrências registradas.</span></span><span>${escapeHtml(user.name)} · ${escapeHtml(user.role)}</span></div>
     <div class="panel-layout">
@@ -1323,7 +1476,7 @@ async function pagePanel() {
           ${panelTab('structure', 'Bairros e setores')}
           ${panelTab('whatsapp-triage', 'Triagem WhatsApp')}
           ${panelTab('whatsapp', 'WhatsApp Business')}
-          ${panelTab('reports', 'Relatórios')}
+          ${canAccessExecutivePanel(user) ? panelTab('reports', 'Relatórios') : ''}
           ${panelTab('audit', 'Auditoria')}
         </nav>
       </aside>
@@ -1356,7 +1509,7 @@ async function loadPanelData(force = false) {
     request('/api/dashboard/city'),
     canAccessExecutivePanel() ? request(`/api/dashboard/executive?period=${encodeURIComponent(state.executivePeriod || '90d')}`).catch(() => null) : Promise.resolve(null),
     request('/api/occurrences'),
-    request('/api/reports/monthly').catch(() => null),
+    canAccessExecutivePanel() ? request(`/api/reports/summary?type=${encodeURIComponent(state.reportType)}&period=${encodeURIComponent(state.reportPeriod)}&month=${encodeURIComponent(state.reportMonth)}`).catch(() => null) : Promise.resolve(null),
     request('/api/whatsapp/config').catch(() => ({ channel: null, events: [], messages: [], completeness: { filled: 0, total: 6, percent: 0 } }))
   ]);
   let audit = null;
@@ -1930,21 +2083,42 @@ async function pageWhatsAppPublicGuide() {
 function tutorialStep(num, title, text, url='') { return `<article class="tutorial-step"><strong>${num}</strong><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Abrir referência oficial</a>` : ''}</div></article>`; }
 
 function panelReports() {
-  const r = state.panelData.report;
-  const m = r?.metrics || { total: 0, open: 0, resolved: 0, overdue: 0, critical: 0, byCategory: [], byNeighborhood: [] };
+  const r = state.panelData.report?.report;
+  const m = r?.metrics || { total: 0, open: 0, resolved: 0, overdue: 0, criticalOpen: 0, resolutionRate: 0 };
+  const rows = r?.rows || [];
   return `
-    <section class="gov-section">
-      <div class="gov-section__header"><div><h1>Relatório mensal</h1><p>Resumo do mês atual para acompanhamento administrativo. Exportação PDF fica preparada para fase futura.</p></div><button class="gov-button small" data-generate-report>Gerar registro do mês</button></div>
-      <div class="gov-section__body grid-4">
-        <div class="stat-official"><strong>${m.total}</strong><span>Total no mês</span></div>
+    <section class="gov-section report-header">
+      <div class="gov-section__header"><div><span class="section-kicker">Prestação de contas</span><h1>Relatórios e exportação</h1><p>Gere visões operacionais por período e baixe arquivos prontos para acompanhamento administrativo.</p></div><div class="report-actions"><button class="gov-button small" type="button" data-export-report="csv">Exportar CSV</button><button class="gov-button small primary" type="button" data-export-report="pdf">Exportar PDF</button></div></div>
+      <div class="gov-section__body">
+        <form id="reportFilters" class="report-filter">
+          <div class="gov-field"><label for="reportType">Tipo de relatório</label><select id="reportType" name="type">
+            ${Object.entries(reportTypeLabels).map(([value, label]) => `<option value="${value}" ${state.reportType === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
+          </select></div>
+          <div class="gov-field"><label for="reportPeriod">Período</label><select id="reportPeriod" name="period" ${state.reportType === 'monthly' ? 'disabled' : ''}>
+            ${[['30d','Últimos 30 dias'],['90d','Últimos 90 dias'],['180d','Últimos 180 dias'],['365d','Últimos 12 meses'],['all','Todo o histórico']].map(([value, label]) => `<option value="${value}" ${state.reportPeriod === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select></div>
+          <div class="gov-field"><label for="reportMonth">Mês de referência</label><input id="reportMonth" name="month" type="month" value="${escapeHtml(state.reportMonth)}" ${state.reportType !== 'monthly' ? 'disabled' : ''} /></div>
+          <button class="gov-button" type="submit">Atualizar relatório</button>
+        </form>
+        <div class="report-privacy"><strong>Privacidade por padrão</strong><span>${escapeHtml(r?.privacyNotice || 'As exportações não incluem nome, telefone, e-mail, descrição livre ou endereço detalhado.')}</span></div>
+      </div>
+    </section>
+    <section class="report-kpis">
+        <div class="stat-official"><strong>${m.total}</strong><span>Ocorrências</span></div>
         <div class="stat-official warning"><strong>${m.open}</strong><span>Em andamento</span></div>
         <div class="stat-official success"><strong>${m.resolved}</strong><span>Resolvidas</span></div>
         <div class="stat-official danger"><strong>${m.overdue}</strong><span>Atrasadas</span></div>
-      </div>
+        <div class="stat-official danger"><strong>${m.criticalOpen}</strong><span>Críticas abertas</span></div>
+        <div class="stat-official"><strong>${m.resolutionRate}%</strong><span>Taxa de resolução</span></div>
     </section>
-    <section class="gov-section"><div class="gov-section__header"><h2>Resumo por categoria e bairro</h2></div><div class="gov-section__body grid-2">${miniTable('Categorias', m.byCategory)}${miniTable('Bairros', m.byNeighborhood)}</div></section>
-    <section class="gov-section"><div class="gov-section__header"><h2>Ocorrências do mês</h2></div><div class="gov-section__body">${occurrenceTable(r?.occurrences || [])}</div></section>
+    <section class="gov-section"><div class="gov-section__header"><div><h2>${escapeHtml(r?.typeLabel || reportTypeLabels[state.reportType])}</h2><p>${escapeHtml(r?.periodLabel || '')} · gerado em ${r?.generatedAt ? fmtDate(r.generatedAt) : 'agora'}</p></div></div><div class="gov-section__body">${miniTable('Agrupamentos principais', r?.breakdown || [])}</div></section>
+    <section class="gov-section"><div class="gov-section__header"><div><h2>Base operacional exportável</h2><p>Campos livres e dados do cidadão foram removidos desta visualização.</p></div></div><div class="gov-section__body">${reportSafeTable(rows)}</div></section>
   `;
+}
+
+function reportSafeTable(rows = []) {
+  if (!rows.length) return empty('Nenhuma ocorrência encontrada para o relatório selecionado.');
+  return `<div class="data-table-wrap"><table class="gov-table"><thead><tr><th>Protocolo</th><th>Categoria</th><th>Bairro</th><th>Setor</th><th>Situação</th><th>Prioridade</th><th>SLA</th><th>Registro</th></tr></thead><tbody>${rows.map(row => `<tr><td><strong>${escapeHtml(row.protocol)}</strong></td><td>${escapeHtml(row.category)}</td><td>${escapeHtml(row.neighborhood)}</td><td>${escapeHtml(row.department)}</td><td>${badgeStatus(row.status)}</td><td>${badgePriority(row.priority)}</td><td><span class="badge ${row.slaStatus === 'ATRASADA' ? 'danger' : 'success'}">${row.slaStatus === 'ATRASADA' ? 'Atrasada' : 'No prazo'}</span></td><td>${fmtDate(row.createdAt)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 function panelAudit() {
@@ -2293,6 +2467,32 @@ function bindPanel() {
   document.querySelectorAll('[data-copy-text]').forEach(button => button.addEventListener('click', async () => {
     const text = button.dataset.copyText || '';
     try { await navigator.clipboard.writeText(text); toast('Resposta copiada.'); } catch { toast(text); }
+  }));
+
+  const reportFilters = document.querySelector('#reportFilters');
+  if (reportFilters) reportFilters.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(reportFilters).entries());
+    state.reportType = values.type || state.reportType;
+    state.reportPeriod = values.period || state.reportPeriod;
+    state.reportMonth = values.month || state.reportMonth;
+    state.panelData = null;
+    toast('Relatório atualizado.');
+    await render();
+  });
+  document.querySelectorAll('[data-export-report]').forEach(button => button.addEventListener('click', async () => {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Gerando...';
+    try {
+      await downloadOperationalReport(button.dataset.exportReport);
+      toast(`Arquivo ${String(button.dataset.exportReport || '').toUpperCase()} gerado sem dados pessoais.`);
+    } catch (error) {
+      toast(error.message || 'Nao foi possivel exportar o relatorio.');
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
   }));
 
   const generate = document.querySelector('[data-generate-report]');
